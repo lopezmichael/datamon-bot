@@ -1,0 +1,16 @@
+[Unit]
+Description=Datamon Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=datamon
+WorkingDirectory=/opt/datamon-bot
+EnvironmentFile=/opt/datamon-bot/.env
+ExecStart=/opt/datamon-bot/.venv/bin/python bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
