@@ -166,6 +166,18 @@ async def resolve_request(pool: asyncpg.Pool, thread_id: str, resolved_by: str) 
     return result == "UPDATE 1"
 
 
+async def get_super_admin_discord_ids(pool: asyncpg.Pool) -> list[str]:
+    """Get Discord user IDs for all active super_admins."""
+    rows = await pool.fetch(
+        """
+        SELECT discord_user_id
+        FROM admin_users
+        WHERE role = 'super_admin' AND is_active = TRUE AND discord_user_id IS NOT NULL
+        """
+    )
+    return [r["discord_user_id"] for r in rows if r["discord_user_id"]]
+
+
 async def get_scene_count(pool: asyncpg.Pool) -> int:
     row = await pool.fetchrow(
         "SELECT COUNT(*) AS cnt FROM scenes WHERE scene_type IN ('metro', 'online') AND is_active = TRUE"

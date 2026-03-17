@@ -47,8 +47,21 @@ class Reactions(commands.Cog):
 
         # DB lookup
         request = await db.get_request_by_thread(self.bot.pool, str(channel.id))
-        if not request:
-            return
+
+        if request:
+            await self._resolve_app_thread(channel, forum_config, request, guild, payload)
+        else:
+            await self._resolve_manual_thread(channel, forum_config, guild, payload)
+
+    async def _resolve_app_thread(
+        self,
+        channel: discord.Thread,
+        forum_config: dict,
+        request: dict,
+        guild: discord.Guild,
+        payload: discord.RawReactionActionEvent,
+    ) -> None:
+        """Resolve an app-created thread (has DB record)."""
         if request["status"] == "resolved":
             return
 
@@ -92,25 +105,12 @@ class Reactions(commands.Cog):
         if not resolved:
             return
 
-        # Add resolve tag while preserving existing tags
+        # Add resolve tag + post confirmation
         tag_id = forum_config["resolve_tag"]
         label = forum_config["label"]
 
-        try:
-            existing_tags = [t.id for t in channel.applied_tags] if channel.applied_tags else []
-            if tag_id not in existing_tags:
-                # Get the tag object from the parent forum
-                parent = guild.get_channel(channel.parent_id)
-                if parent and isinstance(parent, discord.ForumChannel):
-                    all_tags = {t.id: t for t in parent.available_tags}
-                    new_tags = [all_tags[tid] for tid in existing_tags if tid in all_tags]
-                    if tag_id in all_tags:
-                        new_tags.append(all_tags[tag_id])
-                    await channel.edit(applied_tags=new_tags)
-        except discord.Forbidden:
-            log.warning("Cannot edit tags on thread %s", channel.id)
+        await self._apply_resolve_tag(channel, guild, tag_id)
 
-        # Post confirmation
         try:
             await channel.send(f"\u2705 **{label}** by {member.mention}")
         except discord.Forbidden:
@@ -122,6 +122,73 @@ class Reactions(commands.Cog):
             f"Request #{request['id']} **{label.lower()}** by {member.mention}{scene_info}"
         )
         log.info("Request #%d resolved by %s", request["id"], member)
+
+    async def _resolve_manual_thread(
+        self,
+        channel: discord.Thread,
+        forum_config: dict,
+        guild: discord.Guild,
+        payload: discord.RawReactionActionEvent,
+    ) -> None:
+        """Resolve a manual thread (no DB record). Tag-only, any DigiLab admin can resolve."""
+        member = guild.get_member(payload.user_id)
+        if not member:
+            return
+
+        # Permission check: reactor must have any DigiLab role
+        has_digilab_role = any(r.id in config.DIGILAB_ROLE_IDS for r in member.roles)
+        if not has_digilab_role:
+            try:
+                msg = await channel.fetch_message(payload.message_id)
+                await msg.remove_reaction(payload.emoji, member)
+            except discord.Forbidden:
+                pass
+
+            try:
+                await member.send("You need admin access to resolve threads.")
+            except discord.Forbidden:
+                pass
+            return
+
+        # Check if already tagged as resolved
+        tag_id = forum_config["resolve_tag"]
+        label = forum_config["label"]
+        existing_tag_ids = {t.id for t in channel.applied_tags} if channel.applied_tags else set()
+        if tag_id in existing_tag_ids:
+            return
+
+        # Add resolve tag + post confirmation
+        await self._apply_resolve_tag(channel, guild, tag_id)
+
+        try:
+            await channel.send(f"\u2705 **{label}** by {member.mention}")
+        except discord.Forbidden:
+            pass
+
+        await log_to_discord(
+            f"Manual thread **{label.lower()}** by {member.mention} in {channel.mention}"
+        )
+        log.info("Manual thread %s resolved by %s", channel.id, member)
+
+    async def _apply_resolve_tag(
+        self,
+        channel: discord.Thread,
+        guild: discord.Guild,
+        tag_id: int,
+    ) -> None:
+        """Add the resolve tag to a thread while preserving existing tags."""
+        try:
+            existing_tags = [t.id for t in channel.applied_tags] if channel.applied_tags else []
+            if tag_id not in existing_tags:
+                parent = guild.get_channel(channel.parent_id)
+                if parent and isinstance(parent, discord.ForumChannel):
+                    all_tags = {t.id: t for t in parent.available_tags}
+                    new_tags = [all_tags[tid] for tid in existing_tags if tid in all_tags]
+                    if tag_id in all_tags:
+                        new_tags.append(all_tags[tag_id])
+                    await channel.edit(applied_tags=new_tags)
+        except discord.Forbidden:
+            log.warning("Cannot edit tags on thread %s", channel.id)
 
 
 async def setup(bot: commands.Bot) -> None:

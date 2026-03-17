@@ -42,10 +42,26 @@ TAG_SHIPPED: int = _require_int("DISCORD_TAG_SHIPPED")
 
 # Forum channel → resolve config mapping
 FORUM_CHANNELS: dict[int, dict] = {
-    CHANNEL_SCENE_COORDINATION: {"resolve_tag": TAG_RESOLVED, "label": "Resolved"},
-    CHANNEL_SCENE_REQUESTS: {"resolve_tag": TAG_ONBOARDED, "label": "Onboarded"},
-    CHANNEL_BUG_REPORTS: {"resolve_tag": TAG_FIXED, "label": "Fixed"},
-    CHANNEL_FEATURE_REQUESTS: {"resolve_tag": TAG_SHIPPED, "label": "Shipped"},
+    CHANNEL_SCENE_COORDINATION: {
+        "resolve_tag": TAG_RESOLVED,
+        "label": "Resolved",
+        "channel_type": "scene_coordination",
+    },
+    CHANNEL_SCENE_REQUESTS: {
+        "resolve_tag": TAG_ONBOARDED,
+        "label": "Onboarded",
+        "channel_type": "scene_requests",
+    },
+    CHANNEL_BUG_REPORTS: {
+        "resolve_tag": TAG_FIXED,
+        "label": "Fixed",
+        "channel_type": "bug_reports",
+    },
+    CHANNEL_FEATURE_REQUESTS: {
+        "resolve_tag": TAG_SHIPPED,
+        "label": "Shipped",
+        "channel_type": "feature_requests",
+    },
 }
 
 # Webhook for #bot-log
