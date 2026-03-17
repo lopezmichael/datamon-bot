@@ -78,8 +78,14 @@ class ThreadWatcher(commands.Cog):
             log.debug("Could not fetch starter message for thread %s", thread.id, exc_info=True)
 
         # Build mention list for admins not already tagged
+        # If scene has direct or regional admins, skip super_admins (they don't need to be pinged)
+        has_scene_admins = any(
+            a["assignment_type"] in ("direct", "regional") for a in admins
+        )
         mentions = []
         for admin in admins:
+            if has_scene_admins and admin["assignment_type"] == "global":
+                continue
             if admin["discord_user_id"] and admin["discord_user_id"] not in already_mentioned:
                 mentions.append(f"<@{admin['discord_user_id']}>")
 

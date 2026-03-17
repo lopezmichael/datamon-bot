@@ -48,7 +48,7 @@ class Archiver(commands.Cog):
                 continue
 
             for thread in forum.threads:
-                if thread.archived or thread.locked:
+                if thread.archived or thread.locked or thread.flags.pinned:
                     continue
 
                 # Check for completion tag
