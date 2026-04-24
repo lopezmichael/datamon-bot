@@ -84,7 +84,7 @@ ROLE_MAP: dict[str, int] = {
 DIGILAB_ROLE_IDS: set[int] = {ROLE_PLATFORM_ADMIN, ROLE_REGIONAL_ADMIN, ROLE_SCENE_ADMIN}
 
 # App base URL
-APP_BASE_URL = "https://app.digilab.cards"
+APP_BASE_URL = "https://digilab.cards"
 
 # Logging
 logging.basicConfig(

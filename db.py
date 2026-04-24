@@ -38,12 +38,22 @@ async def create_pool() -> asyncpg.Pool:
 # ---------------------------------------------------------------------------
 
 async def get_active_admins(pool: asyncpg.Pool) -> list[asyncpg.Record]:
-    """All active admins with their Discord user IDs and roles."""
+    """All active admins with their Discord user IDs and roles.
+
+    Resolves role from game_admin_roles (new) → user.is_super_admin → admin_users.role (legacy).
+    """
     return await pool.fetch(
         """
-        SELECT user_id, username, discord_user_id, role
-        FROM admin_users
-        WHERE is_active = TRUE
+        SELECT au.user_id, au.username, au.discord_user_id,
+               COALESCE(
+                   CASE WHEN u.is_super_admin = TRUE THEN 'super_admin' END,
+                   gar.role,
+                   au.role
+               ) AS role
+        FROM admin_users au
+        LEFT JOIN "user" u ON u.legacy_admin_id = au.user_id
+        LEFT JOIN game_admin_roles gar ON gar.user_id = u.id AND gar.game_id = 'digimon'
+        WHERE au.is_active = TRUE
         """
     )
 
@@ -80,19 +90,25 @@ async def get_admins_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncp
     return await pool.fetch(
         """
         -- Direct scene admins
-        SELECT DISTINCT au.user_id, au.username, au.discord_user_id, au.role,
+        SELECT DISTINCT au.user_id, au.username, au.discord_user_id,
+               COALESCE(gar0.role, au.role) AS role,
                aus.is_primary, 'direct' AS assignment_type
         FROM admin_user_scenes aus
         JOIN admin_users au ON aus.user_id = au.user_id
+        LEFT JOIN "user" u0 ON u0.legacy_admin_id = au.user_id
+        LEFT JOIN game_admin_roles gar0 ON gar0.user_id = u0.id AND gar0.game_id = 'digimon'
         WHERE aus.scene_id = $1 AND au.is_active = TRUE
 
         UNION
 
         -- Regional admins (country match, optional state match)
-        SELECT DISTINCT au.user_id, au.username, au.discord_user_id, au.role,
+        SELECT DISTINCT au.user_id, au.username, au.discord_user_id,
+               COALESCE(gar1.role, au.role) AS role,
                FALSE AS is_primary, 'regional' AS assignment_type
         FROM admin_regions ar
         JOIN admin_users au ON ar.user_id = au.user_id
+        LEFT JOIN "user" u1 ON u1.legacy_admin_id = au.user_id
+        LEFT JOIN game_admin_roles gar1 ON gar1.user_id = u1.id AND gar1.game_id = 'digimon'
         JOIN scenes s ON s.scene_id = $1
         WHERE au.is_active = TRUE
           AND ar.country = s.country
@@ -100,11 +116,14 @@ async def get_admins_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncp
 
         UNION
 
-        -- Super admins (global access)
-        SELECT DISTINCT au.user_id, au.username, au.discord_user_id, au.role,
+        -- Super admins (global access) — check both legacy and new flags
+        SELECT DISTINCT au.user_id, au.username, au.discord_user_id,
+               'super_admin' AS role,
                FALSE AS is_primary, 'global' AS assignment_type
         FROM admin_users au
-        WHERE au.role = 'super_admin' AND au.is_active = TRUE
+        LEFT JOIN "user" u2 ON u2.legacy_admin_id = au.user_id
+        WHERE au.is_active = TRUE
+          AND (au.role = 'super_admin' OR u2.is_super_admin = TRUE)
 
         ORDER BY role, username
         """,
@@ -167,12 +186,18 @@ async def resolve_request(pool: asyncpg.Pool, thread_id: str, resolved_by: str) 
 
 
 async def get_super_admin_discord_ids(pool: asyncpg.Pool) -> list[str]:
-    """Get Discord user IDs for all active super_admins."""
+    """Get Discord user IDs for all active super_admins.
+
+    Checks both legacy admin_users.role and new user.is_super_admin flag.
+    """
     rows = await pool.fetch(
         """
-        SELECT discord_user_id
-        FROM admin_users
-        WHERE role = 'super_admin' AND is_active = TRUE AND discord_user_id IS NOT NULL
+        SELECT DISTINCT au.discord_user_id
+        FROM admin_users au
+        LEFT JOIN "user" u ON u.legacy_admin_id = au.user_id
+        WHERE au.is_active = TRUE
+          AND au.discord_user_id IS NOT NULL
+          AND (au.role = 'super_admin' OR u.is_super_admin = TRUE)
         """
     )
     return [r["discord_user_id"] for r in rows if r["discord_user_id"]]
@@ -193,7 +218,18 @@ async def get_admin_scenes_for_user(pool: asyncpg.Pool, discord_user_id: str) ->
     the user's Discord role. An empty list means "admin but no scene assignments".
     """
     user = await pool.fetchrow(
-        "SELECT user_id, role FROM admin_users WHERE discord_user_id = $1 AND is_active = TRUE",
+        """
+        SELECT au.user_id,
+               COALESCE(
+                   CASE WHEN u.is_super_admin = TRUE THEN 'super_admin' END,
+                   gar.role,
+                   au.role
+               ) AS role
+        FROM admin_users au
+        LEFT JOIN "user" u ON u.legacy_admin_id = au.user_id
+        LEFT JOIN game_admin_roles gar ON gar.user_id = u.id AND gar.game_id = 'digimon'
+        WHERE au.discord_user_id = $1 AND au.is_active = TRUE
+        """,
         discord_user_id,
     )
     if not user:
