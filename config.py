@@ -39,6 +39,10 @@ TAG_RESOLVED: int = _require_int("DISCORD_TAG_RESOLVED")
 TAG_ONBOARDED: int = _require_int("DISCORD_TAG_ONBOARDED")
 TAG_FIXED: int = _require_int("DISCORD_TAG_FIXED")
 TAG_SHIPPED: int = _require_int("DISCORD_TAG_SHIPPED")
+TAG_NEW_BUG_REPORTS: int = _require_int("DISCORD_TAG_NEW_BUG_REPORTS")
+TAG_UNDER_REVIEW_BUG_REPORTS: int = _require_int("DISCORD_TAG_UNDER_REVIEW_BUG_REPORTS")
+TAG_CONFIRMED_BUG_REPORTS: int = _require_int("DISCORD_TAG_CONFIRMED_BUG_REPORTS")
+TAG_WONT_FIX: int = _require_int("DISCORD_TAG_WONT_FIX")
 
 # Forum channel → resolve config mapping
 FORUM_CHANNELS: dict[int, dict] = {
@@ -54,6 +58,7 @@ FORUM_CHANNELS: dict[int, dict] = {
     },
     CHANNEL_BUG_REPORTS: {
         "resolve_tag": TAG_FIXED,
+        "initial_tags": [TAG_NEW_BUG_REPORTS, TAG_UNDER_REVIEW_BUG_REPORTS, TAG_CONFIRMED_BUG_REPORTS],
         "label": "Fixed",
         "channel_type": "bug_reports",
     },

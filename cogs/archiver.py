@@ -12,15 +12,14 @@ from utils import log_to_discord
 
 log = logging.getLogger(__name__)
 
-# Tag IDs that indicate a thread is "done"
-COMPLETION_TAGS: set[int] = {
-    config.TAG_RESOLVED,
-    config.TAG_ONBOARDED,
-    config.TAG_FIXED,
-    config.TAG_SHIPPED,
+# Tag IDs that indicate a thread is "done", with their archive delay
+COMPLETION_TAGS: dict[int, timedelta] = {
+    config.TAG_RESOLVED: timedelta(hours=48),
+    config.TAG_ONBOARDED: timedelta(hours=48),
+    config.TAG_FIXED: timedelta(hours=48),
+    config.TAG_SHIPPED: timedelta(hours=48),
+    config.TAG_WONT_FIX: timedelta(weeks=1),
 }
-
-STALE_THRESHOLD = timedelta(hours=48)
 
 
 class Archiver(commands.Cog):
@@ -51,17 +50,21 @@ class Archiver(commands.Cog):
                 if thread.archived or thread.locked or thread.flags.pinned:
                     continue
 
-                # Check for completion tag
+                # Check for completion tag and determine archive threshold
                 tag_ids = {t.id for t in thread.applied_tags} if thread.applied_tags else set()
-                if not tag_ids & COMPLETION_TAGS:
+                matching = tag_ids & COMPLETION_TAGS.keys()
+                if not matching:
                     continue
+
+                # Use the shortest threshold among matching tags
+                threshold = min(COMPLETION_TAGS[tid] for tid in matching)
 
                 # Check staleness via last_message_id snowflake
                 if not thread.last_message_id:
                     continue
 
                 last_msg_time = discord.utils.snowflake_time(thread.last_message_id)
-                if now - last_msg_time < STALE_THRESHOLD:
+                if now - last_msg_time < threshold:
                     continue
 
                 try:

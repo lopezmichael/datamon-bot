@@ -106,10 +106,9 @@ class Reactions(commands.Cog):
             return
 
         # Add resolve tag + post confirmation
-        tag_id = forum_config["resolve_tag"]
         label = forum_config["label"]
 
-        await self._apply_resolve_tag(channel, guild, tag_id)
+        await self._apply_resolve_tag(channel, guild, forum_config)
 
         try:
             await channel.send(f"\u2705 **{label}** by {member.mention}")
@@ -151,14 +150,13 @@ class Reactions(commands.Cog):
             return
 
         # Check if already tagged as resolved
-        tag_id = forum_config["resolve_tag"]
         label = forum_config["label"]
         existing_tag_ids = {t.id for t in channel.applied_tags} if channel.applied_tags else set()
-        if tag_id in existing_tag_ids:
+        if forum_config["resolve_tag"] in existing_tag_ids:
             return
 
         # Add resolve tag + post confirmation
-        await self._apply_resolve_tag(channel, guild, tag_id)
+        await self._apply_resolve_tag(channel, guild, forum_config)
 
         try:
             await channel.send(f"\u2705 **{label}** by {member.mention}")
@@ -174,17 +172,22 @@ class Reactions(commands.Cog):
         self,
         channel: discord.Thread,
         guild: discord.Guild,
-        tag_id: int,
+        forum_config: dict,
     ) -> None:
-        """Add the resolve tag to a thread while preserving existing tags."""
+        """Add the resolve tag and remove initial/status tags from a thread."""
+        tag_id = forum_config["resolve_tag"]
+        strip_tags = set(forum_config.get("initial_tags", []))
         try:
             existing_tags = [t.id for t in channel.applied_tags] if channel.applied_tags else []
-            if tag_id not in existing_tags:
+            if tag_id not in existing_tags or strip_tags & set(existing_tags):
                 parent = guild.get_channel(channel.parent_id)
                 if parent and isinstance(parent, discord.ForumChannel):
                     all_tags = {t.id: t for t in parent.available_tags}
-                    new_tags = [all_tags[tid] for tid in existing_tags if tid in all_tags]
-                    if tag_id in all_tags:
+                    new_tags = [
+                        all_tags[tid] for tid in existing_tags
+                        if tid in all_tags and tid not in strip_tags
+                    ]
+                    if tag_id in all_tags and tag_id not in {t.id for t in new_tags}:
                         new_tags.append(all_tags[tag_id])
                     await channel.edit(applied_tags=new_tags)
         except discord.Forbidden:
