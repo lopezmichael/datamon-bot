@@ -1,14 +1,16 @@
 # Datamon Bot — Next Steps
 
-## Current Status (2026-03-15)
+## Current Status (2026-04-30)
 
 - All bot code implemented, bug-reviewed, and compiles cleanly
-- Bot connects to Discord as **Datamon#4349**, all 5 cogs load, command tree synced
+- Bot connects to Discord as **Datamon#4349**, all 7 cogs load, command tree synced
 - **84/86** admin `discord_user_id` values linked in DB (2 not in server: aomceodeadly, gamescornerdigimon)
 - Role sync verified: all Discord roles match DB state
-- Slash commands (`/admins`, `/roster`, `/scene`, `/help`) confirmed working
+- Slash commands (`/admins`, `/roster`, `/requests`, `/mystats`, `/scene`, `/help`) confirmed working
 - DB migrations applied: `discord_thread_id` on `admin_requests`, `admin_regions` table created
 - Existing requests have NULL `discord_thread_id` — react-to-resolve only works on new requests
+- All four forum channels have consistent tag behavior (resolve tags, status stripping, auto-archive)
+- `resolved_by` now stores Discord user ID (not display name) — old records unaffected
 
 ---
 
@@ -49,15 +51,40 @@ Start the bot locally: `source .venv/bin/activate && python bot.py`
 1. Find or create a thread with a resolve tag (Resolved/Onboarded/Fixed/Shipped) that has been inactive for 48+ hours
 2. Wait for the hourly archive loop (or restart the bot to trigger it sooner)
 3. **Expected:** thread gets archived, logged to `#bot-log`
-4. To test quickly: temporarily lower `STALE_THRESHOLD` in `cogs/archiver.py` to `timedelta(minutes=5)`
+4. Test "Won't Fix" / "Not Planned" / "On Hold" tags — these should auto-archive after 1 week
+5. To test quickly: temporarily lower thresholds in `cogs/archiver.py`
 
 ### 5. Slash Commands (already confirmed working, but double-check)
 
 - `/admins dfw` — should show admins with role emojis and mentions
 - `/roster dfw` — admin-only, shows stores + tournament counts
+- `/requests` — admin-only, shows open request counts per type with oldest age and avg resolution time
+- `/mystats` — admin-only, shows your resolved count, avg resolution time, scenes managed
 - `/scene dfw` — shows stats + link to app
-- `/help` — shows command list (ephemeral)
+- `/help` — shows command list (ephemeral) — should list all 6 commands
 - Test autocomplete by typing partial scene names
+
+### 6. Auto-Tag "New" on Manual Threads
+
+1. Create a new thread manually in `#bug-reports`, `#feature-requests`, or `#scene-requests`
+2. **Expected:** Bot auto-applies the "New" tag and posts a welcome message
+3. Verify the tag respects the 5-tag limit (if thread already has 5 tags, "New" is skipped)
+
+### 7. Stale Thread Nudges
+
+1. Find or create an unresolved thread in `#bug-reports` or `#scene-requests` with no activity for 3+ days
+2. Wait for the daily nudge loop (runs every 24 hours)
+3. **Expected:** Bot posts a reminder and re-pings relevant admins
+4. Verify resolved threads (with Fixed/Won't Fix/etc. tags) are NOT nudged
+5. Feature request threads should never be nudged
+
+### 8. Weekly Scene Health Digest
+
+1. Runs automatically on Mondays at 09:00 UTC
+2. **Expected:** Bot creates a forum thread in `#scene-coordination` with sections for dormant scenes, unassigned scenes, and deactivated stores
+3. Follow-up message mentions relevant admins for each flagged scene
+4. If all scenes are healthy, no thread is created
+5. To test: temporarily change the weekday check in `cogs/digest.py`
 
 ---
 

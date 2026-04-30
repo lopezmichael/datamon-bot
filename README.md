@@ -26,15 +26,19 @@ python bot.py
 |---------|--------|-------------|
 | `/admins [scene]` | Anyone | View admins for a scene |
 | `/roster [scene]` | Scene Admin+ | View stores & tournaments |
+| `/requests` | Scene Admin+ | Open request summary |
+| `/mystats` | Scene Admin+ | Personal resolution stats |
 | `/scene [scene]` | Anyone | View scene info and stats |
 | `/help` | Anyone | Show bot commands and info |
 
 ## Features
 
 - **Role Sync** (5 min loop) — Syncs Discord roles with DB admin roles. Adds/removes Platform Admin, Regional Admin, and Scene Admin roles. Logs changes to `#bot-log`.
-- **React-to-Resolve** — React ✅ on a forum thread's first message to resolve the request. Enforces scene-level permissions. Adds the appropriate tag (Resolved/Onboarded/Fixed/Shipped).
-- **Thread Watcher** — Posts resolve instructions and tags relevant admins when new threads are created in tracked forum channels.
-- **Auto-Archive** (1 hr loop) — Archives resolved threads that have been inactive for 48+ hours.
+- **React-to-Resolve** — React ✅ on a forum thread's first message to resolve the request. Enforces scene-level permissions. Adds the appropriate tag (Resolved/Onboarded/Fixed/Shipped) and strips status tags (New, Under Review, etc.).
+- **Thread Watcher** — Posts channel-specific instructions, tags relevant admins, and auto-applies "New" tag when threads are created in tracked forum channels.
+- **Auto-Archive** (1 hr loop) — Archives resolved threads after 48 hours of inactivity. Archives "Won't Fix", "Not Planned", and "On Hold" threads after 1 week.
+- **Stale Nudges** (daily) — Reminds admins about unresolved threads in `#bug-reports` and `#scene-requests` with no activity for 3+ days.
+- **Scene Health Digest** (weekly, Mondays 09:00 UTC) — Posts a `#scene-coordination` forum thread summarizing dormant scenes (no tournaments in 60+ days), scenes with no assigned admin, and recently deactivated stores. Mentions relevant admins per scene. Skips the post if everything is healthy.
 
 ## Architecture
 
@@ -42,12 +46,15 @@ python bot.py
 bot.py              Entry point, Bot subclass, lifecycle
 config.py           Env var loading, constants, ROLE_MAP
 db.py               asyncpg pool + query helpers
+messages.py         Message templates for forum threads
 cogs/
   role_sync.py      Periodic role sync task
-  commands.py       Slash commands (/admins, /roster, /scene, /help)
+  commands.py       Slash commands (/admins, /roster, /requests, /mystats, /scene, /help)
   reactions.py      React-to-resolve handler
-  thread_watcher.py Post instructions on new forum threads
+  thread_watcher.py Post instructions + auto-tag New on forum threads
   archiver.py       Auto-archive stale threads
+  nudge.py          Stale thread nudges (3-day threshold)
+  digest.py         Weekly scene health digest
 ```
 
 ## Deployment
@@ -65,9 +72,9 @@ sudo journalctl -u datamon -f
 
 ## Forum Channel Mapping
 
-| Channel | ✅ Action | Tag Added |
-|---------|-----------|-----------|
-| `#scene-coordination` | Resolve request | Resolved |
-| `#scene-requests` | Mark onboarded | Onboarded |
-| `#bug-reports` | Mark fixed | Fixed |
-| `#feature-requests` | Mark shipped | Shipped |
+| Channel | ✅ Resolve Tag | Status Tags Stripped | Archive-after-1-week Tag |
+|---------|---------------|---------------------|------------------------|
+| `#scene-coordination` | Resolved | None (tags are metadata) | — |
+| `#scene-requests` | Onboarded | New, Needs More Info, Needs Admin | On Hold |
+| `#bug-reports` | Fixed | New, Under Review, Confirmed | Won't Fix |
+| `#feature-requests` | Shipped | New, Planned | Not Planned |

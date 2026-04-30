@@ -67,9 +67,10 @@ Full server structure documented in `digilab-app/docs/plans/2026-02-26-discord-s
 
 | Channel | Type | Bot Interaction |
 |---------|------|----------------|
-| `#scene-coordination` | Forum | React-to-resolve, auto-archive, tag management |
-| `#scene-requests` | Forum | Tag updates on onboarding |
-| `#bug-reports` | Forum | Tag updates on fix |
+| `#scene-coordination` | Forum | React-to-resolve, auto-archive, tag management, weekly health digest |
+| `#scene-requests` | Forum | Tag updates on onboarding, status tag stripping, stale nudges |
+| `#bug-reports` | Forum | Tag updates on fix, status tag stripping, stale nudges |
+| `#feature-requests` | Forum | Tag updates on ship, status tag stripping |
 | DMs | Direct Message | Welcome DM delivery |
 
 ---
@@ -267,11 +268,35 @@ All commands are guild-only (no DM usage).
 **Purpose:** Keep forum channels clean by archiving resolved threads.
 
 **Logic:**
-- Every hour, scan `#scene-coordination` threads
-- If thread has "Resolved" tag AND last message is >48 hours old → archive
-- Don't archive threads without "Resolved" tag (they may be waiting on action)
+- Every hour, scan all tracked forum channels
+- If thread has a completion tag (Resolved/Onboarded/Fixed/Shipped) AND last message is >48 hours old → archive
+- If thread has a terminal tag (Won't Fix/Not Planned/On Hold) AND last message is >1 week old → archive
+- Don't archive threads without a completion tag (they may be waiting on action)
+- Skip pinned threads
 
 **Implementation:** `discord.ext.tasks` loop, PATCH channel with `archived: true`.
+
+### 5a. Stale Thread Nudges
+
+**Purpose:** Prevent requests from falling through the cracks across time zones.
+
+**Logic:**
+- Every 24 hours, scan `#bug-reports` and `#scene-requests` for threads with no activity in 3+ days
+- Skip threads with any completion/resolve tag
+- Post a reminder and re-ping the relevant scene admins (or super admins as fallback)
+- The nudge message itself resets the inactivity clock, so the next nudge won't fire for another 3 days
+- Feature requests are excluded (they're reviewed on a slower cadence)
+
+### 5b. Weekly Scene Health Digest
+
+**Purpose:** Surface scenes that need attention before problems compound.
+
+**Logic:**
+- Runs every Monday at 09:00 UTC
+- Queries for: dormant scenes (no tournaments in 60+ days), scenes with no assigned admin, stores deactivated in the past week
+- If nothing to report, skips the post entirely
+- Creates a forum thread in `#scene-coordination` with the digest
+- Follow-up message mentions only the admins relevant to each flagged scene (not everyone)
 
 ### 5. Welcome DM Delivery
 
@@ -292,11 +317,16 @@ datamon-bot/
 ├── bot.py                  # Entry point — bot startup, extension loading
 ├── cogs/
 │   ├── role_sync.py        # Periodic role sync task
-│   ├── commands.py         # Slash commands (/admins, /roster, /scene, /help)
+│   ├── commands.py         # Slash commands (/admins, /roster, /requests, /mystats, /scene, /help)
 │   ├── reactions.py        # React-to-resolve handler
-│   └── archiver.py         # Auto-archive stale threads
+│   ├── thread_watcher.py   # Post instructions + auto-tag New on forum threads
+│   ├── archiver.py         # Auto-archive stale threads
+│   ├── nudge.py            # Stale thread nudges (3-day threshold)
+│   └── digest.py           # Weekly scene health digest (Mondays 09:00 UTC)
 ├── db.py                   # asyncpg connection pool, query helpers
 ├── config.py               # Environment variable loading, constants
+├── messages.py             # Message templates for forum thread responses
+├── utils.py                # Shared utilities (webhook logging)
 ├── requirements.txt        # discord.py, asyncpg, python-dotenv
 ├── .env.example            # Template for required env vars
 ├── systemd/
@@ -308,28 +338,14 @@ datamon-bot/
 
 ## Environment Variables
 
-```bash
-# Discord
-DISCORD_BOT_TOKEN=           # Bot token from Developer Portal
-DISCORD_GUILD_ID=            # Server ID (for guild-specific commands)
+See `.env.example` for the full list with comments. Key groups:
 
-# Discord Role IDs (right-click role → Copy ID)
-DISCORD_ROLE_PLATFORM_ADMIN=
-DISCORD_ROLE_REGIONAL_ADMIN=
-DISCORD_ROLE_SCENE_ADMIN=
-
-# Discord Channel IDs
-DISCORD_CHANNEL_SCENE_COORDINATION=   # Forum channel ID for react-to-resolve
-
-# Discord Forum Tag IDs
-DISCORD_TAG_RESOLVED=                 # Same value as in digilab-app .env
-
-# Database (same Neon instance as digilab-app)
-NEON_HOST=
-NEON_DATABASE=
-NEON_USER=
-NEON_PASSWORD=
-```
+- **Discord Bot** — `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`
+- **Role IDs** — `DISCORD_ROLE_PLATFORM_ADMIN`, `DISCORD_ROLE_REGIONAL_ADMIN`, `DISCORD_ROLE_SCENE_ADMIN`
+- **Channel IDs** — `DISCORD_CHANNEL_SCENE_COORDINATION`, `DISCORD_CHANNEL_SCENE_REQUESTS`, `DISCORD_CHANNEL_BUG_REPORTS`, `DISCORD_CHANNEL_FEATURE_REQUESTS`
+- **Forum Tag IDs** — Resolve tags (Resolved, Onboarded, Fixed, Shipped), status tags (New, Under Review, Confirmed, Planned, Needs More Info, Needs Admin), terminal tags (Won't Fix, Not Planned, On Hold)
+- **Webhook** — `DISCORD_WEBHOOK_BOT_LOG`
+- **Database** — `NEON_HOST`, `NEON_DATABASE`, `NEON_USER`, `NEON_PASSWORD`
 
 ---
 

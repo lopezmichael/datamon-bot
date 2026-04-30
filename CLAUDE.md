@@ -23,12 +23,15 @@ bot.py              # Entry point, DatamonBot subclass, lifecycle
 config.py           # Env vars, ROLE_MAP, FORUM_CHANNELS
 db.py               # asyncpg pool, all query helpers
 utils.py            # Shared utilities (webhook logging)
+messages.py         # Message templates for forum thread responses
 cogs/
   role_sync.py      # 5-min loop: DB roles -> Discord roles
-  commands.py       # /admins, /roster, /scene, /help
+  commands.py       # /admins, /roster, /scene, /requests, /mystats, /help
   reactions.py      # React-to-resolve on forum threads
-  thread_watcher.py # Posts instructions on new forum threads
+  thread_watcher.py # Posts instructions + auto-tags New on forum threads
   archiver.py       # 1-hr loop: archives stale resolved threads
+  nudge.py          # 24-hr loop: nudges stale unresolved threads (3 days)
+  digest.py         # Weekly scene health digest (Mondays 09:00 UTC)
 systemd/
   datamon.service   # Production systemd unit file
 ```
@@ -48,6 +51,8 @@ systemd/
 |---------|--------|-------------|
 | `/admins [scene]` | Public | View admins for a scene |
 | `/roster [scene]` | Admin-only | Stores & tournament counts |
+| `/requests` | Admin-only | Open request summary (ephemeral) |
+| `/mystats` | Admin-only | Personal resolution stats (ephemeral) |
 | `/scene [scene]` | Public | Scene info card |
 | `/help` | Public | Bot features (ephemeral) |
 
