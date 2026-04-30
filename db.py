@@ -270,6 +270,21 @@ async def get_recently_deactivated_stores(pool: asyncpg.Pool, days: int = 7) -> 
     )
 
 
+async def get_admin_stats(pool: asyncpg.Pool, display_name: str) -> asyncpg.Record | None:
+    """Get resolution stats for an admin by their Discord display name (resolved_by)."""
+    return await pool.fetchrow(
+        """
+        SELECT COUNT(*) AS resolved_count,
+               AVG(resolved_at - created_at) AS avg_resolution_time,
+               MIN(resolved_at) AS first_resolved,
+               MAX(resolved_at) AS last_resolved
+        FROM admin_requests
+        WHERE resolved_by = $1 AND status = 'resolved'
+        """,
+        display_name,
+    )
+
+
 async def get_scene_count(pool: asyncpg.Pool) -> int:
     row = await pool.fetchrow(
         "SELECT COUNT(*) AS cnt FROM scenes WHERE scene_type IN ('metro', 'online') AND is_active = TRUE"

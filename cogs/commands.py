@@ -209,6 +209,61 @@ class Commands(commands.Cog):
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # --- /mystats ---
+    @app_commands.command(name="mystats", description="View your admin stats (admin only)")
+    async def mystats_cmd(self, interaction: discord.Interaction) -> None:
+        # Permission check: any DigiLab role
+        has_role = any(r.id in config.DIGILAB_ROLE_IDS for r in interaction.user.roles)
+        if not has_role:
+            await interaction.response.send_message(
+                "You need admin access to view your stats.", ephemeral=True
+            )
+            return
+
+        stats = await db.get_admin_stats(self.bot.pool, interaction.user.display_name)
+
+        # Scene count
+        user_scenes = await db.get_admin_scenes_for_user(
+            self.bot.pool, str(interaction.user.id)
+        )
+
+        embed = discord.Embed(
+            title=f"Stats — {interaction.user.display_name}",
+            color=0x5865F2,
+        )
+
+        if user_scenes is not None:
+            scene_count = "All (global)" if len(user_scenes) == 0 else str(len(user_scenes))
+            embed.add_field(name="Scenes Managed", value=scene_count, inline=True)
+
+        if stats and stats["resolved_count"]:
+            embed.add_field(name="Requests Resolved", value=str(stats["resolved_count"]), inline=True)
+
+            if stats["avg_resolution_time"]:
+                avg_hours = stats["avg_resolution_time"].total_seconds() / 3600
+                if avg_hours >= 24:
+                    avg_str = f"{avg_hours / 24:.1f} days"
+                else:
+                    avg_str = f"{avg_hours:.1f} hours"
+                embed.add_field(name="Avg Resolution Time", value=avg_str, inline=True)
+
+            if stats["first_resolved"]:
+                embed.add_field(
+                    name="Active Since",
+                    value=stats["first_resolved"].strftime("%b %d, %Y"),
+                    inline=True,
+                )
+            if stats["last_resolved"]:
+                embed.add_field(
+                    name="Last Resolved",
+                    value=stats["last_resolved"].strftime("%b %d, %Y"),
+                    inline=True,
+                )
+        else:
+            embed.description = "No resolved requests yet — react \u2705 on a thread to get started!"
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # --- /help ---
     @app_commands.command(name="help", description="Show bot commands and info")
     async def help_cmd(self, interaction: discord.Interaction) -> None:
@@ -223,6 +278,7 @@ class Commands(commands.Cog):
                 "**/admins** `[scene]` — View admins for a scene\n"
                 "**/roster** `[scene]` — View stores & tournaments (admin only)\n"
                 "**/requests** — Open request summary (admin only)\n"
+                "**/mystats** — Your admin stats (admin only)\n"
                 "**/scene** `[scene]` — View scene info and stats\n"
                 "**/help** — Show this message"
             ),
