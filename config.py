@@ -43,6 +43,13 @@ TAG_NEW_BUG_REPORTS: int = _require_int("DISCORD_TAG_NEW_BUG_REPORTS")
 TAG_UNDER_REVIEW_BUG_REPORTS: int = _require_int("DISCORD_TAG_UNDER_REVIEW_BUG_REPORTS")
 TAG_CONFIRMED_BUG_REPORTS: int = _require_int("DISCORD_TAG_CONFIRMED_BUG_REPORTS")
 TAG_WONT_FIX: int = _require_int("DISCORD_TAG_WONT_FIX")
+TAG_NEW_FEATURE_REQUESTS: int = _require_int("DISCORD_TAG_NEW_FEATURE_REQUESTS")
+TAG_PLANNED_FEATURE_REQUESTS: int = _require_int("DISCORD_TAG_PLANNED_FEATURE_REQUESTS")
+TAG_NOT_PLANNED: int = _require_int("DISCORD_TAG_NOT_PLANNED")
+TAG_NEW_SCENE_REQUESTS: int = _require_int("DISCORD_TAG_NEW_SCENE_REQUESTS")
+TAG_NEEDS_MORE_INFO_SCENE_REQUESTS: int = _require_int("DISCORD_TAG_NEEDS_MORE_INFO_SCENE_REQUESTS")
+TAG_NEEDS_ADMIN_SCENE_REQUESTS: int = _require_int("DISCORD_TAG_NEEDS_ADMIN_SCENE_REQUESTS")
+TAG_ON_HOLD: int = _require_int("DISCORD_TAG_ON_HOLD")
 
 # Forum channel → resolve config mapping
 FORUM_CHANNELS: dict[int, dict] = {
@@ -53,6 +60,7 @@ FORUM_CHANNELS: dict[int, dict] = {
     },
     CHANNEL_SCENE_REQUESTS: {
         "resolve_tag": TAG_ONBOARDED,
+        "initial_tags": [TAG_NEW_SCENE_REQUESTS, TAG_NEEDS_MORE_INFO_SCENE_REQUESTS, TAG_NEEDS_ADMIN_SCENE_REQUESTS],
         "label": "Onboarded",
         "channel_type": "scene_requests",
     },
@@ -64,6 +72,7 @@ FORUM_CHANNELS: dict[int, dict] = {
     },
     CHANNEL_FEATURE_REQUESTS: {
         "resolve_tag": TAG_SHIPPED,
+        "initial_tags": [TAG_NEW_FEATURE_REQUESTS, TAG_PLANNED_FEATURE_REQUESTS],
         "label": "Shipped",
         "channel_type": "feature_requests",
     },

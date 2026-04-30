@@ -19,6 +19,8 @@ COMPLETION_TAGS: dict[int, timedelta] = {
     config.TAG_FIXED: timedelta(hours=48),
     config.TAG_SHIPPED: timedelta(hours=48),
     config.TAG_WONT_FIX: timedelta(weeks=1),
+    config.TAG_NOT_PLANNED: timedelta(weeks=1),
+    config.TAG_ON_HOLD: timedelta(weeks=1),
 }
 
 
