@@ -1,6 +1,7 @@
 """Weekly scene health digest posted to #scene-coordination."""
 
 import asyncio
+import datetime
 import logging
 
 import discord
@@ -10,6 +11,9 @@ import config
 import db
 
 log = logging.getLogger(__name__)
+
+# Run daily at 09:00 UTC, but only post on Mondays
+DIGEST_TIME = datetime.time(hour=9, tzinfo=datetime.timezone.utc)
 
 
 class Digest(commands.Cog):
@@ -22,8 +26,12 @@ class Digest(commands.Cog):
     async def cog_unload(self) -> None:
         self.weekly_digest.cancel()
 
-    @tasks.loop(hours=168)  # 7 days
+    @tasks.loop(time=DIGEST_TIME)
     async def weekly_digest(self) -> None:
+        # Only run on Mondays
+        if discord.utils.utcnow().weekday() != 0:
+            return
+
         guild = self.bot.get_guild(config.GUILD_ID)
         if not guild:
             return
@@ -70,36 +78,31 @@ class Digest(commands.Cog):
         body = "\n\n".join(sections)
 
         # Create a forum thread
+        date_str = discord.utils.utcnow().strftime("%b %d, %Y")
         try:
             thread, _ = await forum.create_thread(
-                name=f"Weekly Scene Health Check",
+                name=f"Weekly Scene Health Check \u2014 {date_str}",
                 content=f"\U0001f4ca **Weekly Scene Health Check**\n\n{body}",
             )
-        except discord.Forbidden:
-            log.warning("Cannot create digest thread in scene coordination")
+        except discord.HTTPException:
+            log.warning("Cannot create digest thread in scene coordination", exc_info=True)
             return
 
-        # Post per-scene admin mentions for dormant and unassigned scenes
-        scene_ids = set()
+        # Build a mapping of scene_id -> display name from all results
+        scene_names: dict[int, str] = {}
         for r in dormant:
-            scene_ids.add(r["scene_id"])
+            scene_names[r["scene_id"]] = r["display_name"]
         for r in unassigned:
-            scene_ids.add(r["scene_id"])
+            scene_names[r["scene_id"]] = r["display_name"]
         for r in deactivated:
-            scene_ids.add(r["scene_id"])
+            scene_names.setdefault(r["scene_id"], r["scene_name"])
 
+        # Post per-scene admin mentions
+        scene_ids = set(scene_names.keys())
         mention_parts: dict[str, list[str]] = {}  # discord_user_id -> list of scene names
         for scene_id in scene_ids:
             admins = await db.get_admins_for_scene(self.bot.pool, scene_id)
-            # Find the scene display name from our results
-            scene_name = None
-            for collection in (dormant, unassigned, deactivated):
-                for r in collection:
-                    if r["scene_id"] == scene_id:
-                        scene_name = r.get("display_name") or r.get("scene_name")
-                        break
-                if scene_name:
-                    break
+            scene_name = scene_names.get(scene_id, "Unknown")
 
             has_scene_admins = any(
                 a["assignment_type"] in ("direct", "regional") for a in admins
@@ -109,8 +112,7 @@ class Digest(commands.Cog):
                     continue
                 if a["discord_user_id"]:
                     mention_parts.setdefault(a["discord_user_id"], [])
-                    if scene_name:
-                        mention_parts[a["discord_user_id"]].append(scene_name)
+                    mention_parts[a["discord_user_id"]].append(scene_name)
 
         if mention_parts:
             lines = []

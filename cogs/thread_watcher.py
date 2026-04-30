@@ -123,11 +123,13 @@ class ThreadWatcher(commands.Cog):
                 if parent and isinstance(parent, discord.ForumChannel):
                     all_tags = {t.id: t for t in parent.available_tags}
                     if new_tag_id in all_tags:
-                        existing = list(thread.applied_tags) if thread.applied_tags else []
-                        if new_tag_id not in {t.id for t in existing}:
+                        # Re-fetch thread to get current tags (avoid race with Discord)
+                        fresh = parent.get_thread(thread.id)
+                        existing = list(fresh.applied_tags) if fresh and fresh.applied_tags else list(thread.applied_tags or [])
+                        if len(existing) < 5 and new_tag_id not in {t.id for t in existing}:
                             existing.append(all_tags[new_tag_id])
                             await thread.edit(applied_tags=existing)
-            except discord.Forbidden:
+            except discord.HTTPException:
                 log.warning("Cannot apply New tag to thread %s", thread.id)
 
         welcome = messages.manual_thread_message(channel_type)

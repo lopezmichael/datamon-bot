@@ -31,10 +31,13 @@ NUDGE_CHANNELS: dict[int, set[int]] = {
 
 # Completion tags — threads with these are resolved/closed, don't nudge
 DONE_TAGS: set[int] = {
+    config.TAG_RESOLVED,
     config.TAG_FIXED,
     config.TAG_WONT_FIX,
     config.TAG_ONBOARDED,
     config.TAG_ON_HOLD,
+    config.TAG_SHIPPED,
+    config.TAG_NOT_PLANNED,
 }
 
 

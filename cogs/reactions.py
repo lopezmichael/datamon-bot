@@ -100,7 +100,7 @@ class Reactions(commands.Cog):
 
         # Resolve in DB
         resolved = await db.resolve_request(
-            self.bot.pool, str(channel.id), member.display_name
+            self.bot.pool, str(channel.id), str(member.id)
         )
         if not resolved:
             return

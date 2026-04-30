@@ -220,7 +220,7 @@ class Commands(commands.Cog):
             )
             return
 
-        stats = await db.get_admin_stats(self.bot.pool, interaction.user.display_name)
+        stats = await db.get_admin_stats(self.bot.pool, str(interaction.user.id))
 
         # Scene count
         user_scenes = await db.get_admin_scenes_for_user(

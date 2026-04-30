@@ -270,8 +270,8 @@ async def get_recently_deactivated_stores(pool: asyncpg.Pool, days: int = 7) -> 
     )
 
 
-async def get_admin_stats(pool: asyncpg.Pool, display_name: str) -> asyncpg.Record | None:
-    """Get resolution stats for an admin by their Discord display name (resolved_by)."""
+async def get_admin_stats(pool: asyncpg.Pool, discord_user_id: str) -> asyncpg.Record:
+    """Get resolution stats for an admin by their Discord user ID (resolved_by)."""
     return await pool.fetchrow(
         """
         SELECT COUNT(*) AS resolved_count,
@@ -281,7 +281,7 @@ async def get_admin_stats(pool: asyncpg.Pool, display_name: str) -> asyncpg.Reco
         FROM admin_requests
         WHERE resolved_by = $1 AND status = 'resolved'
         """,
-        display_name,
+        discord_user_id,
     )
 
 
