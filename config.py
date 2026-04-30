@@ -60,18 +60,21 @@ FORUM_CHANNELS: dict[int, dict] = {
     },
     CHANNEL_SCENE_REQUESTS: {
         "resolve_tag": TAG_ONBOARDED,
+        "new_tag": TAG_NEW_SCENE_REQUESTS,
         "initial_tags": [TAG_NEW_SCENE_REQUESTS, TAG_NEEDS_MORE_INFO_SCENE_REQUESTS, TAG_NEEDS_ADMIN_SCENE_REQUESTS],
         "label": "Onboarded",
         "channel_type": "scene_requests",
     },
     CHANNEL_BUG_REPORTS: {
         "resolve_tag": TAG_FIXED,
+        "new_tag": TAG_NEW_BUG_REPORTS,
         "initial_tags": [TAG_NEW_BUG_REPORTS, TAG_UNDER_REVIEW_BUG_REPORTS, TAG_CONFIRMED_BUG_REPORTS],
         "label": "Fixed",
         "channel_type": "bug_reports",
     },
     CHANNEL_FEATURE_REQUESTS: {
         "resolve_tag": TAG_SHIPPED,
+        "new_tag": TAG_NEW_FEATURE_REQUESTS,
         "initial_tags": [TAG_NEW_FEATURE_REQUESTS, TAG_PLANNED_FEATURE_REQUESTS],
         "label": "Shipped",
         "channel_type": "feature_requests",

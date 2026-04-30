@@ -113,6 +113,23 @@ class ThreadWatcher(commands.Cog):
         channel_type: str,
     ) -> None:
         """Post welcome/guidance for manually created threads."""
+        # Auto-apply "New" tag if the channel has one
+        forum_config = config.FORUM_CHANNELS[thread.parent_id]
+        new_tag_id = forum_config.get("new_tag")
+        if new_tag_id:
+            try:
+                guild = self.bot.get_guild(config.GUILD_ID)
+                parent = guild.get_channel(thread.parent_id) if guild else None
+                if parent and isinstance(parent, discord.ForumChannel):
+                    all_tags = {t.id: t for t in parent.available_tags}
+                    if new_tag_id in all_tags:
+                        existing = list(thread.applied_tags) if thread.applied_tags else []
+                        if new_tag_id not in {t.id for t in existing}:
+                            existing.append(all_tags[new_tag_id])
+                            await thread.edit(applied_tags=existing)
+            except discord.Forbidden:
+                log.warning("Cannot apply New tag to thread %s", thread.id)
+
         welcome = messages.manual_thread_message(channel_type)
 
         if not welcome:
