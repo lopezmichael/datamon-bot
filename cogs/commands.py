@@ -169,6 +169,46 @@ class Commands(commands.Cog):
 
         await interaction.response.send_message(embed=embed)
 
+    # --- /requests ---
+    @app_commands.command(name="requests", description="View open request summary (admin only)")
+    async def requests_cmd(self, interaction: discord.Interaction) -> None:
+        # Permission check: any DigiLab role
+        has_role = any(r.id in config.DIGILAB_ROLE_IDS for r in interaction.user.roles)
+        if not has_role:
+            await interaction.response.send_message(
+                "You need admin access to view request stats.", ephemeral=True
+            )
+            return
+
+        rows = await db.get_request_summary(self.bot.pool)
+        if not rows:
+            await interaction.response.send_message("No requests found.", ephemeral=True)
+            return
+
+        total_open = 0
+        lines = []
+        for r in rows:
+            total_open += r["open_count"]
+            label = r["request_type"].replace("_", " ").title()
+            line = f"**{label}** — {r['open_count']} open"
+            if r["oldest_open"]:
+                days = (discord.utils.utcnow() - r["oldest_open"]).days
+                line += f" (oldest: {days}d ago)"
+            if r["avg_resolution_time"]:
+                avg_hours = r["avg_resolution_time"].total_seconds() / 3600
+                if avg_hours >= 24:
+                    line += f" · avg resolve: {avg_hours / 24:.1f}d"
+                else:
+                    line += f" · avg resolve: {avg_hours:.1f}h"
+            lines.append(line)
+
+        embed = discord.Embed(
+            title=f"Open Requests — {total_open} total",
+            description="\n".join(lines),
+            color=0xFEE75C,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
     # --- /help ---
     @app_commands.command(name="help", description="Show bot commands and info")
     async def help_cmd(self, interaction: discord.Interaction) -> None:
@@ -182,6 +222,7 @@ class Commands(commands.Cog):
             value=(
                 "**/admins** `[scene]` — View admins for a scene\n"
                 "**/roster** `[scene]` — View stores & tournaments (admin only)\n"
+                "**/requests** — Open request summary (admin only)\n"
                 "**/scene** `[scene]` — View scene info and stats\n"
                 "**/help** — Show this message"
             ),

@@ -203,6 +203,22 @@ async def get_super_admin_discord_ids(pool: asyncpg.Pool) -> list[str]:
     return [r["discord_user_id"] for r in rows if r["discord_user_id"]]
 
 
+async def get_request_summary(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """Get open request counts, oldest open, and avg resolution time per request_type."""
+    return await pool.fetch(
+        """
+        SELECT request_type,
+               COUNT(*) FILTER (WHERE status != 'resolved') AS open_count,
+               MIN(created_at) FILTER (WHERE status != 'resolved') AS oldest_open,
+               COUNT(*) FILTER (WHERE status = 'resolved') AS resolved_count,
+               AVG(resolved_at - created_at) FILTER (WHERE status = 'resolved') AS avg_resolution_time
+        FROM admin_requests
+        GROUP BY request_type
+        ORDER BY open_count DESC
+        """
+    )
+
+
 async def get_scene_count(pool: asyncpg.Pool) -> int:
     row = await pool.fetchrow(
         "SELECT COUNT(*) AS cnt FROM scenes WHERE scene_type IN ('metro', 'online') AND is_active = TRUE"
