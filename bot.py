@@ -30,6 +30,7 @@ class DatamonBot(commands.Bot):
             "cogs.archiver",
             "cogs.thread_watcher",
             "cogs.nudge",
+            "cogs.digest",
         ]
         for cog in cog_names:
             await self.load_extension(cog)

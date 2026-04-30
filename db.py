@@ -219,6 +219,57 @@ async def get_request_summary(pool: asyncpg.Pool) -> list[asyncpg.Record]:
     )
 
 
+async def get_dormant_scenes(pool: asyncpg.Pool, days: int = 60) -> list[asyncpg.Record]:
+    """Scenes with no tournaments in the last N days."""
+    return await pool.fetch(
+        """
+        SELECT s.scene_id, s.display_name,
+               MAX(t.date) AS last_tournament
+        FROM scenes s
+        LEFT JOIN stores st ON st.scene_id = s.scene_id
+        LEFT JOIN tournaments t ON t.store_id = st.store_id
+        WHERE s.scene_type IN ('metro', 'online') AND s.is_active = TRUE
+        GROUP BY s.scene_id, s.display_name
+        HAVING MAX(t.date) IS NULL OR MAX(t.date) < CURRENT_DATE - $1 * INTERVAL '1 day'
+        ORDER BY MAX(t.date) NULLS FIRST
+        """,
+        days,
+    )
+
+
+async def get_unassigned_scenes(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """Active scenes with no direct admin assignment."""
+    return await pool.fetch(
+        """
+        SELECT s.scene_id, s.display_name
+        FROM scenes s
+        WHERE s.scene_type IN ('metro', 'online') AND s.is_active = TRUE
+          AND NOT EXISTS (
+              SELECT 1 FROM admin_user_scenes aus
+              JOIN admin_users au ON aus.user_id = au.user_id
+              WHERE aus.scene_id = s.scene_id AND au.is_active = TRUE
+          )
+        ORDER BY s.display_name
+        """
+    )
+
+
+async def get_recently_deactivated_stores(pool: asyncpg.Pool, days: int = 7) -> list[asyncpg.Record]:
+    """Stores that were deactivated in the last N days."""
+    return await pool.fetch(
+        """
+        SELECT st.store_id, st.name, st.city, st.state,
+               s.scene_id, s.display_name AS scene_name
+        FROM stores st
+        JOIN scenes s ON st.scene_id = s.scene_id
+        WHERE st.is_active = FALSE
+          AND st.updated_at >= CURRENT_DATE - $1 * INTERVAL '1 day'
+        ORDER BY s.display_name, st.name
+        """,
+        days,
+    )
+
+
 async def get_scene_count(pool: asyncpg.Pool) -> int:
     row = await pool.fetchrow(
         "SELECT COUNT(*) AS cnt FROM scenes WHERE scene_type IN ('metro', 'online') AND is_active = TRUE"
