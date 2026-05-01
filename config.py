@@ -93,9 +93,13 @@ NEON_PASSWORD: str = _require("NEON_PASSWORD")
 # Role mapping: DB role name → Discord role ID
 ROLE_MAP: dict[str, int] = {
     "super_admin": ROLE_PLATFORM_ADMIN,
+    "platform_admin": ROLE_PLATFORM_ADMIN,
     "regional_admin": ROLE_REGIONAL_ADMIN,
     "scene_admin": ROLE_SCENE_ADMIN,
 }
+
+# Roles with global scene access (treated equivalently in datamon)
+GLOBAL_ADMIN_ROLES: set[str] = {"super_admin", "platform_admin"}
 
 # Set of all DigiLab role IDs for quick membership checks
 DIGILAB_ROLE_IDS: set[int] = {ROLE_PLATFORM_ADMIN, ROLE_REGIONAL_ADMIN, ROLE_SCENE_ADMIN}

@@ -124,8 +124,8 @@ class Nudge(commands.Cog):
             if parts:
                 return " ".join(parts)
 
-        # Fallback: ping super admins
-        admin_ids = await db.get_super_admin_discord_ids(self.bot.pool)
+        # Fallback: ping global admins
+        admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
         if admin_ids:
             return " ".join(f"<@{uid}>" for uid in admin_ids)
 

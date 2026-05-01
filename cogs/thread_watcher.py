@@ -78,7 +78,7 @@ class ThreadWatcher(commands.Cog):
             log.debug("Could not fetch starter message for thread %s", thread.id, exc_info=True)
 
         # Build mention list for admins not already tagged
-        # If scene has direct or regional admins, skip super_admins (they don't need to be pinged)
+        # If scene has direct or regional admins, skip global admins (they don't need to be pinged)
         has_scene_admins = any(
             a["assignment_type"] in ("direct", "regional") for a in admins
         )
@@ -145,7 +145,7 @@ class ThreadWatcher(commands.Cog):
 
         # Mention platform admins for manual scene requests and bug reports
         if channel_type in ("scene_requests", "bug_reports"):
-            admin_ids = await db.get_super_admin_discord_ids(self.bot.pool)
+            admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
             if admin_ids:
                 mentions = " ".join(f"<@{uid}>" for uid in admin_ids)
                 try:

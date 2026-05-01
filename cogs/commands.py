@@ -13,6 +13,7 @@ log = logging.getLogger(__name__)
 
 ROLE_EMOJI = {
     "super_admin": "\U0001f534",      # 🔴
+    "platform_admin": "\U0001f534",   # 🔴 (same as super_admin)
     "regional_admin": "\U0001f7e1",   # 🟡
     "scene_admin": "\U0001f7e2",      # 🟢
 }
@@ -103,7 +104,7 @@ class Commands(commands.Cog):
             user_scenes = await db.get_admin_scenes_for_user(
                 self.bot.pool, str(interaction.user.id)
             )
-            # None = not an admin; empty list = super_admin (global access)
+            # None = not an admin; empty list = global admin (super/platform)
             has_access = (
                 user_scenes is not None
                 and (len(user_scenes) == 0 or scene_row["scene_id"] in user_scenes)

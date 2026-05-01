@@ -79,7 +79,7 @@ class Reactions(commands.Cog):
             has_access = (
                 user_scenes is not None
                 and (
-                    len(user_scenes) == 0  # super_admin (global access)
+                    len(user_scenes) == 0  # global admin (super/platform)
                     or not request["scene_id"]  # request has no scene
                     or request["scene_id"] in user_scenes
                 )
