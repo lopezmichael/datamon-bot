@@ -30,8 +30,15 @@ class Reactions(commands.Cog):
         if not guild:
             return
 
-        # Must be a thread
+        # Must be a thread. Fall back to fetch if not in cache —
+        # `get_channel_or_thread` only checks active-thread cache, which can
+        # miss after bot restarts or for low-activity / older threads.
         channel = guild.get_channel_or_thread(payload.channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(payload.channel_id)
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return
         if not isinstance(channel, discord.Thread):
             return
 
@@ -66,7 +73,7 @@ class Reactions(commands.Cog):
             return
 
         # Permission check: reactor must be admin for the request's scene or Platform Admin
-        member = guild.get_member(payload.user_id)
+        member = await self._get_member(guild, payload.user_id)
         if not member:
             return
 
@@ -130,7 +137,7 @@ class Reactions(commands.Cog):
         payload: discord.RawReactionActionEvent,
     ) -> None:
         """Resolve a manual thread (no DB record). Tag-only, any DigiLab admin can resolve."""
-        member = guild.get_member(payload.user_id)
+        member = await self._get_member(guild, payload.user_id)
         if not member:
             return
 
@@ -167,6 +174,15 @@ class Reactions(commands.Cog):
             f"Manual thread **{label.lower()}** by {member.mention} in {channel.mention}"
         )
         log.info("Manual thread %s resolved by %s", channel.id, member)
+
+    async def _get_member(self, guild: discord.Guild, user_id: int):
+        member = guild.get_member(user_id)
+        if member:
+            return member
+        try:
+            return await guild.fetch_member(user_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
 
     async def _apply_resolve_tag(
         self,

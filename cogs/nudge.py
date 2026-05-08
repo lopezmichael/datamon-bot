@@ -1,4 +1,4 @@
-"""Stale thread nudges: remind admins about unresolved threads."""
+"""Stale thread lifecycle: nudge twice, then auto-archive unresolved threads."""
 
 import asyncio
 import logging
@@ -13,7 +13,12 @@ from utils import log_to_discord
 
 log = logging.getLogger(__name__)
 
-STALE_THRESHOLD = timedelta(days=3)
+# Thresholds measured from the last real activity (human reply or webhook
+# starter). Our own bot messages — nudges, instructions, resolve confirmations —
+# do not reset the clock.
+FIRST_NUDGE_AT = timedelta(days=3)
+SECOND_NUDGE_AT = timedelta(days=21)
+AUTO_ARCHIVE_AT = timedelta(days=30)
 
 # Channels to nudge and their status tags (threads with these tags are "in progress", not done)
 NUDGE_CHANNELS: dict[int, set[int]] = {
@@ -59,6 +64,7 @@ class Nudge(commands.Cog):
 
         now = discord.utils.utcnow()
         nudged: list[str] = []
+        archived: list[str] = []
 
         for channel_id, status_tags in NUDGE_CHANNELS.items():
             forum = guild.get_channel(channel_id)
@@ -75,35 +81,92 @@ class Nudge(commands.Cog):
                 if tag_ids & DONE_TAGS:
                     continue
 
-                # Only nudge threads that have a status tag (or no tags at all — manual threads)
+                # Only act on threads with a status tag (or untagged manual threads)
                 if tag_ids and not (tag_ids & status_tags):
                     continue
 
-                # Check staleness
+                # Fast path: skip threads with very recent activity of any kind
                 if not thread.last_message_id:
                     continue
-
-                last_msg_time = discord.utils.snowflake_time(thread.last_message_id)
-                if now - last_msg_time < STALE_THRESHOLD:
+                if now - discord.utils.snowflake_time(thread.last_message_id) < FIRST_NUDGE_AT:
                     continue
 
-                days = (now - last_msg_time).days
-                mentions = await self._get_mentions(thread, channel_id)
+                action = await self._evaluate(thread, now)
+                if action is None:
+                    continue
+                kind, days = action
 
-                try:
-                    await thread.send(
-                        f"\U0001f514 **Reminder** — This thread has had no activity for {days} days. "
-                        f"{mentions}"
-                    )
-                    nudged.append(thread.name)
-                    await asyncio.sleep(1)
-                except discord.Forbidden:
-                    log.warning("Cannot nudge thread %s", thread.name)
+                if kind == "nudge":
+                    mentions = await self._get_mentions(thread, channel_id)
+                    try:
+                        await thread.send(
+                            f"\U0001f514 **Reminder** — This thread has had no activity for {days} days. "
+                            f"{mentions}"
+                        )
+                        nudged.append(thread.name)
+                        await asyncio.sleep(1)
+                    except discord.Forbidden:
+                        log.warning("Cannot nudge thread %s", thread.name)
+                elif kind == "archive":
+                    try:
+                        await thread.send(
+                            f"\U0001f4a4 Closing this thread — no response in {days} days. "
+                            f"Reply to reopen if you still need help."
+                        )
+                        await thread.edit(archived=True)
+                        archived.append(thread.name)
+                        await asyncio.sleep(1)
+                    except discord.Forbidden:
+                        log.warning("Cannot auto-archive thread %s", thread.name)
 
         if nudged:
-            msg = "**Stale Nudges**\n" + "\n".join(f"\u2022 {name}" for name in nudged)
+            msg = "**Stale Nudges**\n" + "\n".join(f"• {name}" for name in nudged)
             await log_to_discord(msg)
             log.info("Nudged %d stale threads", len(nudged))
+        if archived:
+            msg = "**Auto-Archived (no response)**\n" + "\n".join(
+                f"• {name}" for name in archived
+            )
+            await log_to_discord(msg)
+            log.info("Auto-archived %d unresolved threads", len(archived))
+
+    async def _evaluate(self, thread: discord.Thread, now):
+        """Decide what to do with a stale-looking thread.
+
+        Walks recent history to find the latest "real" activity (anything not
+        posted by this bot — webhook starter, human reply, etc.) and counts
+        our own nudge messages newer than that activity. Returns:
+            ("nudge", days)   — send a reminder
+            ("archive", days) — close the thread
+            None              — skip
+        """
+        me_id = self.bot.user.id if self.bot.user else None
+        last_real_activity = None
+        nudges_after_activity = 0
+
+        try:
+            async for msg in thread.history(limit=30):
+                if msg.author.id == me_id:
+                    if msg.content.startswith("\U0001f514"):
+                        nudges_after_activity += 1
+                    continue
+                last_real_activity = msg.created_at
+                break
+        except discord.HTTPException:
+            return None
+
+        if last_real_activity is None:
+            return None
+
+        age = now - last_real_activity
+
+        if age >= AUTO_ARCHIVE_AT:
+            return ("archive", age.days)
+        if age >= SECOND_NUDGE_AT and nudges_after_activity < 2:
+            return ("nudge", age.days)
+        if age >= FIRST_NUDGE_AT and nudges_after_activity < 1:
+            return ("nudge", age.days)
+        return None
 
     async def _get_mentions(self, thread: discord.Thread, channel_id: int) -> str:
         """Build mention string for the relevant admins."""
