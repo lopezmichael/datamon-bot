@@ -84,20 +84,29 @@ async def get_scene_by_slug(pool: asyncpg.Pool, slug: str) -> asyncpg.Record | N
 
 
 async def get_admins_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncpg.Record]:
-    """Get all admins for a scene (direct via admin_user_scenes + regional via admin_regions).
+    """Get admins responsible for a scene, as a geographic cascade.
 
-    Also includes global admins (super_admin + platform_admin).
+    Returns rows tagged with an ``assignment_type`` and a numeric ``tier`` so callers can
+    apply scene -> region -> global precedence (see ``select_tier_admins``):
+
+    - tier 1 ("scene"): ``direct`` admins of the scene, plus ``child_metro`` admins for a
+      ``state`` rollup scene (admins of metros within that state). This is what fixes the
+      common "report lands on a state/country rollup, which has no direct admin" case where
+      the cascade would otherwise fall straight through to global. Country rollups do NOT
+      fan out to child metros (would mass-ping every admin in the country).
+    - tier 2 ("regional"): regional admins matching the scene's country / state.
+    - tier 3 ("global"): super + platform admins.
     """
     return await pool.fetch(
         """
-        -- Direct scene admins
+        -- Direct scene admins (tier 1)
         SELECT DISTINCT au.user_id, au.username, au.discord_user_id,
                COALESCE(
                    CASE WHEN u0.is_super_admin = TRUE THEN 'super_admin' END,
                    CASE WHEN u0.is_platform_admin = TRUE THEN 'platform_admin' END,
                    gar0.role, au.role
                ) AS role,
-               aus.is_primary, 'direct' AS assignment_type
+               aus.is_primary, 'direct' AS assignment_type, 1 AS tier
         FROM admin_user_scenes aus
         JOIN admin_users au ON aus.user_id = au.user_id
         LEFT JOIN "user" u0 ON u0.legacy_admin_id = au.user_id
@@ -106,14 +115,36 @@ async def get_admins_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncp
 
         UNION
 
-        -- Regional admins (country match, optional state match)
+        -- Child-metro admins for a state rollup scene (tier 1)
+        SELECT DISTINCT au.user_id, au.username, au.discord_user_id,
+               COALESCE(
+                   CASE WHEN uc.is_super_admin = TRUE THEN 'super_admin' END,
+                   CASE WHEN uc.is_platform_admin = TRUE THEN 'platform_admin' END,
+                   garc.role, au.role
+               ) AS role,
+               FALSE AS is_primary, 'child_metro' AS assignment_type, 1 AS tier
+        FROM scenes parent
+        JOIN scenes child
+          ON child.scene_type = 'metro'
+         AND child.is_active = TRUE
+         AND child.country = parent.country
+         AND child.state_region = parent.state_region
+        JOIN admin_user_scenes aus ON aus.scene_id = child.scene_id
+        JOIN admin_users au ON aus.user_id = au.user_id
+        LEFT JOIN "user" uc ON uc.legacy_admin_id = au.user_id
+        LEFT JOIN game_admin_roles garc ON garc.user_id = uc.id AND garc.game_id = 'digimon'
+        WHERE parent.scene_id = $1 AND parent.scene_type = 'state' AND au.is_active = TRUE
+
+        UNION
+
+        -- Regional admins, country match + optional state match (tier 2)
         SELECT DISTINCT au.user_id, au.username, au.discord_user_id,
                COALESCE(
                    CASE WHEN u1.is_super_admin = TRUE THEN 'super_admin' END,
                    CASE WHEN u1.is_platform_admin = TRUE THEN 'platform_admin' END,
                    gar1.role, au.role
                ) AS role,
-               FALSE AS is_primary, 'regional' AS assignment_type
+               FALSE AS is_primary, 'regional' AS assignment_type, 2 AS tier
         FROM admin_regions ar
         JOIN admin_users au ON ar.user_id = au.user_id
         LEFT JOIN "user" u1 ON u1.legacy_admin_id = au.user_id
@@ -125,14 +156,14 @@ async def get_admins_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncp
 
         UNION
 
-        -- Global admins (super_admin + platform_admin) — check both legacy and new flags
+        -- Global admins: super + platform, legacy or new flags (tier 3)
         SELECT DISTINCT au.user_id, au.username, au.discord_user_id,
                COALESCE(
                    CASE WHEN u2.is_super_admin = TRUE THEN 'super_admin' END,
                    CASE WHEN u2.is_platform_admin = TRUE THEN 'platform_admin' END,
                    au.role
                ) AS role,
-               FALSE AS is_primary, 'global' AS assignment_type
+               FALSE AS is_primary, 'global' AS assignment_type, 3 AS tier
         FROM admin_users au
         LEFT JOIN "user" u2 ON u2.legacy_admin_id = au.user_id
         WHERE au.is_active = TRUE
@@ -140,10 +171,30 @@ async def get_admins_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncp
                OR u2.is_super_admin = TRUE
                OR u2.is_platform_admin = TRUE)
 
-        ORDER BY role, username
+        ORDER BY tier, role, username
         """,
         scene_id,
     )
+
+
+def select_tier_admins(admins: list[asyncpg.Record]) -> list[asyncpg.Record]:
+    """Apply scene -> region -> global precedence to ``get_admins_for_scene`` rows.
+
+    Returns the admins at the lowest ``tier`` that has at least one mentionable member
+    (a non-null ``discord_user_id``). This is the single source of truth for "who should
+    actually be pinged" so a covered metro never also pings regional/global admins.
+
+    A row may appear under more than one tier (e.g. a direct admin who is also a global
+    admin); de-dupe by ``discord_user_id`` is left to the caller, which also dedupes
+    against whoever was already mentioned in the thread's starter message.
+    """
+    if not admins:
+        return []
+    for tier in (1, 2, 3):
+        in_tier = [a for a in admins if a["tier"] == tier and a["discord_user_id"]]
+        if in_tier:
+            return in_tier
+    return []
 
 
 async def get_stores_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncpg.Record]:

@@ -174,16 +174,16 @@ class Nudge(commands.Cog):
         request = await db.get_request_by_thread(self.bot.pool, str(thread.id))
 
         if request and request["scene_id"]:
-            admins = await db.get_admins_for_scene(self.bot.pool, request["scene_id"])
-            has_scene_admins = any(
-                a["assignment_type"] in ("direct", "regional") for a in admins
+            admins = db.select_tier_admins(
+                await db.get_admins_for_scene(self.bot.pool, request["scene_id"])
             )
             parts = []
+            seen: set[str] = set()
             for a in admins:
-                if has_scene_admins and a["assignment_type"] == "global":
-                    continue
-                if a["discord_user_id"]:
-                    parts.append(f"<@{a['discord_user_id']}>")
+                did = a["discord_user_id"]
+                if did and did not in seen:
+                    seen.add(did)
+                    parts.append(f"<@{did}>")
             if parts:
                 return " ".join(parts)
 

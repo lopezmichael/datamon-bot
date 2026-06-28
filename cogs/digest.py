@@ -101,18 +101,18 @@ class Digest(commands.Cog):
         scene_ids = set(scene_names.keys())
         mention_parts: dict[str, list[str]] = {}  # discord_user_id -> list of scene names
         for scene_id in scene_ids:
-            admins = await db.get_admins_for_scene(self.bot.pool, scene_id)
+            admins = db.select_tier_admins(
+                await db.get_admins_for_scene(self.bot.pool, scene_id)
+            )
             scene_name = scene_names.get(scene_id, "Unknown")
 
-            has_scene_admins = any(
-                a["assignment_type"] in ("direct", "regional") for a in admins
-            )
+            seen: set[str] = set()
             for a in admins:
-                if has_scene_admins and a["assignment_type"] == "global":
-                    continue
-                if a["discord_user_id"]:
-                    mention_parts.setdefault(a["discord_user_id"], [])
-                    mention_parts[a["discord_user_id"]].append(scene_name)
+                did = a["discord_user_id"]
+                if did and did not in seen:
+                    seen.add(did)
+                    mention_parts.setdefault(did, [])
+                    mention_parts[did].append(scene_name)
 
         if mention_parts:
             lines = []

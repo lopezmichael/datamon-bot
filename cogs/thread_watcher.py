@@ -61,12 +61,21 @@ class ThreadWatcher(commands.Cog):
             log.warning("Cannot send instructions to thread %s", thread.id)
             return
 
-        # Post admin mentions if the request has a scene
-        if not request["scene_id"]:
-            return
-
-        admins = await db.get_admins_for_scene(self.bot.pool, request["scene_id"])
-        if not admins:
+        # Resolve who to tag. The bot owns admin tagging end to end (the web app no longer
+        # @mentions admins): scene-scoped requests resolve via the scene -> region -> global
+        # cascade; scene-less requests (bug reports, new-scene requests, data errors with no
+        # resolved scene) go to global admins.
+        if request["scene_id"]:
+            admin_ids = [
+                a["discord_user_id"]
+                for a in db.select_tier_admins(
+                    await db.get_admins_for_scene(self.bot.pool, request["scene_id"])
+                )
+                if a["discord_user_id"]
+            ]
+        else:
+            admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
+        if not admin_ids:
             return
 
         # Check who's already mentioned in the webhook's first message
@@ -77,17 +86,13 @@ class ThreadWatcher(commands.Cog):
         except Exception:
             log.debug("Could not fetch starter message for thread %s", thread.id, exc_info=True)
 
-        # Build mention list for admins not already tagged
-        # If scene has direct or regional admins, skip global admins (they don't need to be pinged)
-        has_scene_admins = any(
-            a["assignment_type"] in ("direct", "regional") for a in admins
-        )
+        # Build mention list for admins not already tagged (de-dupe)
         mentions = []
-        for admin in admins:
-            if has_scene_admins and admin["assignment_type"] == "global":
-                continue
-            if admin["discord_user_id"] and admin["discord_user_id"] not in already_mentioned:
-                mentions.append(f"<@{admin['discord_user_id']}>")
+        seen: set[str] = set()
+        for did in admin_ids:
+            if did and did not in already_mentioned and did not in seen:
+                seen.add(did)
+                mentions.append(f"<@{did}>")
 
         # Also check if the requester is in the server
         if request["discord_username"]:
