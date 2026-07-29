@@ -88,6 +88,25 @@ FORUM_CHANNELS: dict[int, dict] = {
     },
 }
 
+
+def _env_names(prefix: str) -> dict[int, str]:
+    """Reverse-map the IDs defined above back to the env vars they came from.
+
+    Only used by the boot-time forum check in `utils.check_forum_config`, so a
+    bad ID reads as "DISCORD_TAG_FIXED is wrong" instead of a bare snowflake.
+    Derived rather than hand-written so a new ID can never be added without its
+    name: every constant here is `DISCORD_` + its own name.
+    """
+    return {
+        value: f"DISCORD_{name}"
+        for name, value in globals().items()
+        if name.startswith(prefix) and isinstance(value, int)
+    }
+
+
+CHANNEL_ENV_NAMES: dict[int, str] = _env_names("CHANNEL_")
+TAG_ENV_NAMES: dict[int, str] = _env_names("TAG_")
+
 # Webhook for #bot-log
 WEBHOOK_BOT_LOG: str = _require("DISCORD_WEBHOOK_BOT_LOG")
 

@@ -11,7 +11,7 @@
 
 DigiLab is a tournament tracking app for the Digimon TCG community. The DigiLab Discord server serves as the coordination hub for ~30 scene admins across 6 continents. v1.7.3 shipped all app-side prerequisites:
 
-- **Per-action forum threads** — webhooks create a new thread per store request / data error (not one persistent thread per scene)
+- **Per-action forum threads** — webhooks create a new thread per store request / data error (not one persistent thread per scene) *(superseded 2026-07-29 — see the request-flow note below)*
 - **@mentions** — threads tag relevant scene admins and regional admins from `admin_user_scenes` + `admin_regions` tables
 - **`discord_thread_id`** on `admin_requests` — enables bidirectional sync between app and Discord
 - **`admin_regions`** table — country/state assignments for regional admins
@@ -72,6 +72,24 @@ Full server structure documented in `digilab-app/docs/plans/2026-02-26-discord-s
 | `#bug-reports` | Forum | Tag updates on fix, status tag stripping, stale nudges |
 | `#feature-requests` | Forum | Tag updates on ship, status tag stripping |
 | DMs | Direct Message | Welcome DM delivery |
+
+### Request flow
+
+*(Updated 2026-07-29 — the web app's Phase 2 deploy changed where two request types go.)*
+
+Data errors and store requests no longer create Discord threads at all. They are worked in the
+web admin UI and surfaced once a day as a `#admin-digest` summary posted by the web app, with
+admins pinged only on items older than 72 hours. The bot has no part in that path: the digest
+channel is a text channel and isn't in `FORUM_CHANNELS`, so every listener ignores it.
+
+Scene requests and bug reports thread exactly as before, into `#scene-requests` and
+`#bug-reports`. `#scene-coordination` now receives only manual admin discussion, the legacy
+app threads still open from before the shutoff, and the bot's weekly health digest — it stays
+fully wired for those until the legacy threads drain and the channel is retired.
+
+Startup check: the bot verifies every channel and tag ID in `FORUM_CHANNELS` against the live
+guild once at boot, logging mismatches and posting them to `#bot-log`. It is non-fatal, and it
+covers the web app's tag IDs transitively, since those are copied from the bot's.
 
 ---
 
@@ -242,24 +260,25 @@ All commands are guild-only (no DM usage).
 
 **Purpose:** Scene admins resolve requests directly from Discord by reacting to the thread's first message.
 
-**Trigger:** ✅ reaction on the first message of a `#scene-coordination` forum thread.
+**Trigger:** ✅ reaction on the first message of a thread in any tracked forum channel
+(`#scene-coordination`, `#scene-requests`, `#bug-reports`, `#feature-requests`).
 
 **Flow:**
 ```
 1. User reacts ✅ on first message in a thread
-2. Bot checks: is this a #scene-coordination thread?
+2. Bot checks: is this thread in a tracked forum channel?
 3. Bot checks: does this thread have a matching admin_requests.discord_thread_id?
 4. Bot checks: is the reactor a Scene Admin+ for the relevant scene?
 5. If all pass:
    a. UPDATE admin_requests SET status = 'resolved', resolved_by = reactor_username, resolved_at = NOW()
-   b. Add "Resolved" tag to the thread
+   b. Add the channel's completion tag to the thread (Resolved/Onboarded/Fixed/Shipped)
    c. Post confirmation: "✅ Resolved by @user"
 6. If permission check fails: DM the user explaining they need scene admin access
 ```
 
 **Edge cases:**
 - Ignore reactions on non-first messages
-- Ignore reactions in channels other than #scene-coordination
+- Ignore reactions in channels outside `FORUM_CHANNELS`
 - Ignore if request already resolved (idempotent)
 - Remove reaction if unauthorized (feedback that it didn't work)
 

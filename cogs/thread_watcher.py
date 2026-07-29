@@ -68,8 +68,16 @@ class ThreadWatcher(commands.Cog):
 
         # Resolve who to tag. The bot owns admin tagging end to end (the web app no longer
         # @mentions admins): scene-scoped requests resolve via the scene -> region -> global
-        # cascade; scene-less requests (bug reports, new-scene requests, data errors with no
-        # resolved scene) go to global admins.
+        # cascade; scene-less requests go to global admins.
+        #
+        # Since the web app's Phase 2 deploy the only app threads that land here are
+        # scene_request (#scene-requests) and bug_report (#bug-reports), and both are
+        # scene-less in practice, so this normally takes the global branch. The cascade
+        # stays because the branch is data-driven, not channel-driven: any row that does
+        # carry a scene_id still routes by scene. #scene-coordination no longer receives
+        # app threads at all — store_request / data_error go to the admin UI and the daily
+        # #admin-digest — but legacy threads created before the shutoff are still open
+        # there and still resolve through the reaction and archiver paths.
         if request["scene_id"]:
             admin_ids = [
                 a["discord_user_id"]

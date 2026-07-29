@@ -76,6 +76,69 @@ async def log_to_discord(message: str) -> None:
         log.exception("Failed to log to Discord")
 
 
+async def check_forum_config(guild: discord.Guild) -> None:
+    """Verify every configured forum channel and tag ID actually exists. Non-fatal.
+
+    A wrong or deleted ID fails silently and *forever* otherwise: `apply_resolve_tag`
+    logs a warning and bails, the New tag is skipped, and the symptom (threads never
+    archiving, nudges never stopping) only surfaces weeks later — that investigation
+    has already been paid for once. We hold a gateway connection with `available_tags`
+    materialized on every ForumChannel, so the check costs nothing beyond the guild
+    cache we already have. Run once per process, after the cache is populated.
+
+    Alerts name the env var, since that is what has to be edited to fix it. The web
+    app copies its tag IDs verbatim from ours, so this covers those transitively —
+    apart from a bad transcription into their Vercel env, which is a deploy-time
+    problem, not a runtime one.
+    """
+    problems: list[str] = []
+
+    for channel_id, forum_config in config.FORUM_CHANNELS.items():
+        channel_env = config.CHANNEL_ENV_NAMES.get(channel_id, "unknown channel")
+        forum = guild.get_channel(channel_id)
+
+        if forum is None:
+            problems.append(f"`{channel_env}` ({channel_id}) — no such channel in the guild")
+            continue
+        if not isinstance(forum, discord.ForumChannel):
+            problems.append(
+                f"`{channel_env}` (#{forum.name}) — is a {type(forum).__name__}, not a forum"
+            )
+            continue
+
+        # De-dupe first: new_tag is also an initial_tags member in every channel
+        # that has both, and one bad ID should produce one alert line.
+        configured: dict[int, str] = {}
+        for key in ("resolve_tag", "reject_tag", "new_tag"):
+            tag_id = forum_config.get(key)
+            if tag_id is not None:
+                configured.setdefault(tag_id, key)
+        for tag_id in forum_config.get("initial_tags", []):
+            configured.setdefault(tag_id, "initial_tags")
+
+        available = {t.id for t in forum.available_tags}
+        for tag_id, key in configured.items():
+            if tag_id not in available:
+                tag_env = config.TAG_ENV_NAMES.get(tag_id, "unknown tag")
+                problems.append(
+                    f"`{tag_env}` ({tag_id}) — set as `{key}` for #{forum.name}, "
+                    "but that forum has no such tag"
+                )
+
+    if not problems:
+        log.info("Forum config OK — %d channels, all tag IDs present", len(config.FORUM_CHANNELS))
+        return
+
+    for problem in problems:
+        log.error("Forum config: %s", problem)
+
+    await log_to_discord(
+        "⚠️ **Forum config problems at startup** — these IDs are wrong or deleted, "
+        "and everything that depends on them fails silently until they are fixed:\n"
+        + "\n".join(f"• {problem}" for problem in problems)
+    )
+
+
 async def apply_resolve_tag(
     channel: discord.Thread,
     guild: discord.Guild,

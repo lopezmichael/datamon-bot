@@ -39,6 +39,22 @@ python bot.py
 - **Auto-Archive** (1 hr loop) — Archives resolved threads after 48 hours of inactivity. Archives "Won't Fix", "Not Planned", and "On Hold" threads after 1 week.
 - **Stale Nudges** (daily) — Reminds admins about unresolved threads in `#bug-reports` and `#scene-requests` with no activity for 3+ days.
 - **Scene Health Digest** (weekly, Mondays 09:00 UTC) — Posts a `#scene-coordination` forum thread summarizing dormant scenes (no tournaments in 60+ days), scenes with no assigned admin, and recently deactivated stores. Mentions relevant admins per scene. Skips the post if everything is healthy.
+- **Startup Config Check** — On boot, verifies every forum channel ID resolves to a real forum and every configured tag ID exists in that forum. Mismatches are logged and posted to `#bot-log`; the bot keeps running. Without it a wrong tag ID fails silently forever (threads never archive, nudges never stop).
+
+## Request Flow
+
+Where each request type goes, as of the web app's Phase 2 deploy (2026-07-29):
+
+| Request type | Where it lands | Bot's role |
+|--------------|---------------|-----------|
+| Data error | Web admin UI + daily `#admin-digest` post | None — that channel isn't a tracked forum |
+| Store request | Web admin UI + daily `#admin-digest` post | None |
+| Scene request | `#scene-requests` thread | Instructions, admin mentions, nudges, resolve, archive |
+| Bug report | `#bug-reports` thread | Instructions, admin mentions, nudges, resolve, archive |
+| Feature request | `#feature-requests` (manual posts for now) | Resolve, archive |
+
+`#scene-coordination` no longer receives app-created threads. It stays wired for manual admin
+discussion, the legacy threads still open from before the shutoff, and the weekly health digest.
 
 ## Architecture
 
@@ -86,3 +102,7 @@ Environment variables are managed in the Railway dashboard (Variables tab), mirr
 | `#scene-requests` | Onboarded | New, Needs More Info, Needs Admin | On Hold |
 | `#bug-reports` | Fixed | New, Under Review, Confirmed | Won't Fix |
 | `#feature-requests` | Shipped | New, Planned | Not Planned |
+
+The Resolved tag in `#scene-coordination` now applies only to manual threads and to legacy
+app threads (closed in the web app, tagged by the archiver's healing pass) — see Request Flow
+above.

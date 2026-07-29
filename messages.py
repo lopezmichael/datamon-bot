@@ -4,29 +4,12 @@
 # App-created thread messages (thread has a matching admin_requests record)
 # ---------------------------------------------------------------------------
 
+# No "scene_coordination" key: since the web app's Phase 2 deploy it no longer
+# threads store_request / data_error anywhere — those flow through the admin UI
+# and the daily #admin-digest instead. The channel keeps its manual welcome
+# below; a legacy app thread reaching the watcher falls through to the generic
+# fallback in `cogs/thread_watcher.py`.
 _APP_MESSAGES: dict[str, dict[str, str]] = {
-    "scene_coordination": {
-        "store_request": (
-            "\U0001f4cb **Store Request — Action Needed**\n"
-            "\n"
-            "A new store has been requested for this scene. Tagged admins, please:\n"
-            "1. Verify the store exists and is running Digimon TCG events\n"
-            "2. Check if this store is already listed under a different name\n"
-            "3. React \u2705 on the first message when this has been handled\n"
-            "\n"
-            "If you need more info from the requester, reply in this thread."
-        ),
-        "data_error": (
-            "\U0001f50d **Data Error — Review Needed**\n"
-            "\n"
-            "A data error has been reported for this scene. Tagged admins, please:\n"
-            "1. Review the error details above\n"
-            "2. Make the correction in the admin panel if confirmed\n"
-            "3. React \u2705 on the first message when this has been fixed\n"
-            "\n"
-            "If you can't reproduce the issue, ask the reporter for more details in this thread."
-        ),
-    },
     "scene_requests": {
         "scene_request": (
             "\U0001f30d **New Scene Request — Triage Needed**\n"
@@ -51,15 +34,6 @@ _APP_MESSAGES: dict[str, dict[str, str]] = {
             "3. React \u2705 on the first message when this has been addressed\n"
             "\n"
             "If you need more details, ask the reporter in this thread."
-        ),
-        "data_error": (
-            "\U0001f50d **Data Error — Review Needed**\n"
-            "\n"
-            "A data error was reported but couldn't be routed to a specific scene. "
-            "Platform admins, please:\n"
-            "1. Identify which scene this belongs to\n"
-            "2. Review and correct the error if confirmed\n"
-            "3. React \u2705 on the first message when this has been fixed"
         ),
     },
 }
