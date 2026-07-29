@@ -96,11 +96,30 @@ Store requests (2): "Game Haven" (Dallas) · "Card Castle" (Tulsa) → admin/sto
   don't; game-scoping decision needed since the bot hardcodes `game_id='digimon'`).
 - Bot involvement: none. The channel isn't in `FORUM_CHANNELS`, so every listener ignores it.
 
-Web-side verify items carried over from the impact assessment:
-- `resolveDiscordThread` must apply the channel's **resolve tag** on legacy threads, not just
-  post a message — the bot's archiver is tag-driven and only the reaction path tags today.
-- The Apply & Resolve action must tolerate rows already resolved via reaction (and vice
-  versa: reaction on an in-app-resolved row is already a safe no-op, `cogs/reactions.py:72`).
+Web-side verify items carried over from the impact assessment — **both RESOLVED 2026-07-28**
+(digilab-web `c40bd57`):
+- ~~`resolveDiscordThread` must apply the channel's **resolve tag**~~ — **done, and it was
+  worse than "not implemented".** The web function did have a tagging branch, but it read a
+  single `DISCORD_TAG_RESOLVED` env var that **was never set in that repo**, so the branch
+  returned early every time: web-side tagging had run zero times in production, and **this bot
+  has been the only thing tagging threads to date.** That is why the gap was invisible —
+  ✅-resolved threads archived fine, in-app-resolved threads sat open and kept getting nudged.
+  `getResolutionWebhookUrl` is now `getResolutionTarget`, returning the webhook **and** the
+  per-channel tag plan from a map mirroring our `FORUM_CHANNELS` (Resolved / Onboarded /
+  Fixed, plus `Won't Fix` for rejections in #bug-reports). One env var could never have
+  covered three channels anyway — tag IDs are per-forum. Stripping each channel's
+  `initial_tags` is implemented but **conditional on four further IDs they treat as
+  optional**, correctly: stripping is cosmetic, since `nudge.py` tests `tag_ids & DONE_TAGS`
+  before anything else and `archiver.py` gates on the completion tag's presence. So expect
+  in-app-resolved threads to keep wearing their New / Under Review tag alongside the
+  completion tag unless those optional IDs get set too. **Still pending on their side: the
+  three completion-tag IDs must be copied from our `.env` into theirs and into Vercel, or the
+  whole path ships inert.**
+- ~~Apply & Resolve must tolerate rows already resolved via reaction~~ — **done.** It no longer
+  400s on a resolved row; it still performs the entity write and only no-ops the status write,
+  so an admin who ✅'d in Discord and then fixed the data in the app gets the fix applied
+  rather than silently dropped. The reverse (reaction on an in-app-resolved row) was already a
+  safe no-op here (`cogs/reactions.py:72`) and is unchanged.
 
 ## 3. What the bot is (identity statement)
 
@@ -166,7 +185,7 @@ The answer to "users want DigiLab notifications in their own server" — without
 | Trigger | Work |
 |---|---|
 | Anytime | Bot PR 0 (own-thread guard) |
-| Web Phase 1 ships | Nothing bot-side; verify resolve-tag behavior on legacy threads |
+| ✅ Web Phase 1 shipped 2026-07-28 | Nothing bot-side. Resolve-tag behavior verified: web now applies the per-channel completion tag (`c40bd57`); see §2 |
 | Web Phase 2 ships | Server: digest webhook on admin channel. Bot PR 1 (cleanup, can lag) |
 | Web Phase 4 approaches | Bot PR 2 (feature template) before/with deploy; server: feature webhook + tag ID |
 | Web Phases 3 & 5 | Nothing bot-side (role_sync picks up Phase 5 writes automatically) |
@@ -266,8 +285,21 @@ silence = inbox zero" property erodes. The 2026-07-18 rejection of a dedicated c
   `.env.example` (bot fail-fasts on missing env vars — deletion requires this PR first).
 - Then delete the channel server-side.
 
-**PR 4 — game-aware bot (needed by the time a second game's requests flow, not before;
-depends on the A1 schema migration).**
+**PR 4 — game-aware bot (needed by the time a second game's requests flow, not before).**
+
+> **A1 dependency satisfied 2026-07-28** (digilab-web `cc450f7`, applied to the shared
+> production DB). `admin_user_scenes` and `admin_regions` both carry
+> `game_id VARCHAR(30) NOT NULL DEFAULT 'digimon' REFERENCES games(game_id)`; **every row is
+> `'digimon'`**. The `admin_user_scenes` PK is now `(user_id, scene_id, game_id)` and
+> `idx_admin_regions_unique` includes `game_id`. Verified post-migration that our unfiltered
+> join shape still returns 186 scene rows / 8 region rows with no row duplicated under the old
+> narrower keys.
+>
+> **Nothing reads the column yet — on the web side either.** Their writes are game-scoped
+> (`api/admin/users.ts`, because an unscoped role-switch DELETE would wipe another game's
+> assignments), but every read is deliberately unfiltered, for the same reason we are: a
+> one-sided predicate desyncs the two cascades. So this bot is free to stay unfiltered until
+> PR 4, and PR 4 lands together with their Phase 5.
 - `db.py`: parameterize the five hardcoded `game_id = 'digimon'` joins (db.py:56, 113, 135,
   151, 381) by the request row's `game_id`; cascade becomes
   `get_admins_for_scene(scene_id, game_id)`; scope `admin_user_scenes` / `admin_regions`
@@ -289,8 +321,8 @@ depends on the A1 schema migration).**
 | Order | Work |
 |---|---|
 | Now | Bot PR 0 (own-thread guard) |
-| Anytime | Web Phase 1 (Apply & Resolve) — game-agnostic |
-| Before Phase 2 | Schema migration: `game_id` on `admin_user_scenes` + `admin_regions` |
+| ✅ Done 2026-07-28 | Web Phase 1 (Apply & Resolve + resolve tags + atomic store approve), `c40bd57` — game-agnostic |
+| ✅ Done 2026-07-28 | Schema migration: `game_id` on `admin_user_scenes` + `admin_regions` (digilab-web `cc450f7`, applied to the shared production DB and verified idempotent on re-run) |
 | Web Phase 2 | Digest to new `#admin-digest` (A2), game-grouped; server: create channel + webhook. Bot PR 1 (cleanup, can lag) |
 | Web Phase 4 | Bot PR 2 (feature template); server: feature webhook + tag ID |
 | After Phase 2 + legacy drain | Bot PR 3 (retire #scene-coordination) |
@@ -326,3 +358,36 @@ bug was never observed live — there were no own threads to welcome.
    needed *because* the digest will now actually post.
 4. Heads-up at deploy: the first successful digest may be large (60+ days of dormant scenes
    and unassigned scenes have never been reported).
+
+**Two more found 2026-07-28 while shipping the web side's resolve tags. Both belong in PR 0**
+— they are the same failure class the rest of PR 0 already collects (silent failures inside
+our own loops), and both are independent of every web phase, so nothing gates them.
+
+5. **`_apply_resolve_tag` has no 5-tag cap, and an over-cap edit escapes the listener.**
+   `cogs/reactions.py::_apply_resolve_tag` builds `new_tags` by keeping the non-stripped
+   existing tags and appending the resolve tag, with no length bound, and catches only
+   `discord.Forbidden`. On a thread already carrying five non-strippable tags we send six,
+   Discord answers `400`, and the `discord.HTTPException` escapes all the way out of
+   `on_raw_reaction_add` — **after `db.resolve_request` has already committed**
+   (`cogs/reactions.py:107-117`). The row is resolved, the thread is untagged, and the
+   archiver will never touch it: precisely the symptom we just spent a web-side commit fixing
+   from the other direction. `cogs/thread_watcher.py:139-142` already gets both halves right
+   (`if len(existing) < 5` and `except discord.HTTPException`), so the two implementations
+   currently disagree about the same invariant. The web side now caps correctly too — it
+   always preserves the completion tag and drops status tags first to make room
+   (`mergeThreadTags` in `src/lib/discord.ts`, unit-tested), which is the semantics to copy:
+   dropping a status tag is cosmetic, dropping the completion tag is the bug.
+6. **Assert the configured tag IDs exist, once, at startup.** One `GET /channels/{id}` per
+   channel in `FORUM_CHANNELS`, checking every configured tag ID (`resolve_tag`, `new_tag`,
+   `initial_tags`) against that channel's `available_tags`. Today a wrong or deleted tag ID
+   fails silently and forever on **both** sides — we swallow it, and the web app logs a
+   `console.error` into Vercel and moves on — and the symptom (threads never archiving, nudges
+   never stopping) is identical to the bug just fixed, so the next occurrence will cost the
+   same investigation over again.
+
+   **This repo should own it.** We hold a live gateway connection with `available_tags`
+   already materialized on every `ForumChannel` object, and we fail fast on missing env vars
+   at boot already, so this is a few lines in the same place rather than bespoke REST plumbing
+   in an edge function that only ever sees its own three channels. It covers the web app's IDs
+   transitively as well, since theirs are copied verbatim from ours — the residual risk is a
+   bad transcription into their Vercel env, which is a deploy-time check, not a runtime one.

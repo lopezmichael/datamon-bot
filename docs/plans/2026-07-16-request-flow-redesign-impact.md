@@ -1,7 +1,8 @@
 # Request Flow Redesign — datamon-bot Impact Assessment & Change Plan
 
 **Date:** 2026-07-16
-**Status:** Research complete, no implementation yet (web phases not shipped)
+**Status:** Research complete. Web Phase 1 shipped 2026-07-28; both web-side verify items this
+doc raised are closed (TL;DR 5 and §6). No bot implementation yet — bot PRs still pending.
 **Companion doc:** `digilab-web/docs/plans/2026-07-16-request-flow-redesign.md`
 **Follow-up:** decisions locked + PR-by-PR plan in `2026-07-18-decisions-and-forward-plan.md`
 
@@ -35,6 +36,17 @@
    resolved in-app only auto-archive if a completion tag gets applied — the bot's archiver is
    tag-driven, and the bot itself only tags on reaction. `resolveDiscordThread` should apply
    the channel's resolve tag, not just post a message.
+   **CLOSED 2026-07-28** (digilab-web `c40bd57`): `getResolutionTarget` now returns the
+   channel's completion-tag plan alongside the webhook, and `resolveDiscordThread` applies it
+   (Resolved / Onboarded / Fixed, `Won't Fix` for rejections in #bug-reports). Status-tag
+   stripping is implemented but **conditional**: it only happens for tags whose IDs are set
+   web-side, and those four vars are documented as optional there because stripping is purely
+   cosmetic — `nudge.py` tests `tag_ids & DONE_TAGS` first and `archiver.py` gates on the
+   completion tag's presence, so the completion tag alone is what actually retires a thread.
+   Expect resolved threads to keep showing their New / Under Review tag unless those optional
+   IDs get set. Investigation found web-side tagging had never run **at all** — the old code
+   read one `DISCORD_TAG_RESOLVED` that was never set in that repo — so this bot had been the
+   only thing tagging threads. Detail in §6.
 6. **Digest channel: keep the bot read-only.** Concur with the default; reasoning in §5.
 
 ---
@@ -152,6 +164,14 @@ Tables: `admin_user_scenes`, `admin_users`, `"user"` (joined via `legacy_admin_i
 5. Global fallback = all super+platform admins, from either legacy role or user flags.
 6. The bot is `game_id='digimon'`-hardcoded; the web side is multi-game (`gameId`-first
    convention) — decide explicitly whether digest cascades are per-game.
+   **Schema landed 2026-07-28, decision still deliberately deferred.** `admin_user_scenes` and
+   `admin_regions` now carry `game_id` (digilab-web `cc450f7`, every row `'digimon'`), so the
+   cascade *can* be scoped — but neither side does it yet, on purpose. `sceneHasAreaAdmin`
+   (web) and `get_admins_for_scene` (bot) both stay unfiltered so they cannot desync: a
+   predicate added on one side only would change who gets pinged on one side only, which is
+   the exact failure this checklist exists to prevent. They get filtered **together**, at web
+   Phase 5 and bot PR 4. Until then, treat "unfiltered" as the agreed contract, not an
+   oversight.
 7. Also note the plan anchors the cascade to `sceneHasAreaAdmin` (`discord.ts:104`) — that's
    a boolean coverage check; this bot's pair of functions is the behavioral source of truth.
 
@@ -176,13 +196,19 @@ Concur with read-only, for concrete mechanical reasons, not just surface-area ta
   targets the existing feature forum, `DISCORD_TAG_FEATURE` (web) should be set to the value
   of the bot's existing `DISCORD_TAG_NEW_FEATURE_REQUESTS`; the bot needs no new IDs. Only the
   rejected bug-channel variant would force new bot config.
-- **Legacy-thread archiving gap (verify web-side):** the archiver only archives threads
-  carrying a completion tag (`archiver.py:56-59`), and the bot only applies those tags on
-  reaction. If Phase 1's in-app Apply & Resolve resolves a legacy-threaded row,
-  `resolveDiscordThread` must apply the channel's resolve tag (Resolved/Fixed) — otherwise
-  those threads sit unarchived forever. In-app-first resolution is otherwise clean: a later ✅
-  reaction is a no-op (`reactions.py:72`). The reverse race (reaction first) needs the web's
-  apply action to tolerate already-resolved rows.
+- **Legacy-thread archiving gap — CLOSED 2026-07-28** (digilab-web `c40bd57`; was: "verify
+  web-side"). The archiver only archives threads carrying a completion tag
+  (`archiver.py:56-59`), and the bot only applies those tags on reaction. The web app now
+  applies the channel's completion tag on every in-app resolve, via `getResolutionTarget`
+  (a channel map mirroring our `FORUM_CHANNELS`), and its apply action tolerates rows we
+  already resolved by ✅ — it still performs the entity write and only no-ops the status
+  write, so the data fix cannot evaporate. Two findings worth keeping: web-side tagging had
+  **never run once** (the old code read a single `DISCORD_TAG_RESOLVED` that was unset in that
+  repo, so every in-app resolve left its thread untagged), and their old merge was
+  `[...current, tag].slice(0, 5)`, which dropped the tag it was adding on any thread already
+  at five. In-app-first resolution was otherwise clean all along: a later ✅ reaction is a
+  no-op (`reactions.py:72`). **No further web-side verification owed here** — only the deploy
+  step of copying `DISCORD_TAG_RESOLVED` / `_ONBOARDED` / `_FIXED` from our env into theirs.
 - **Who applies the New tag to app-created feature threads?** The bot only auto-tags *manual*
   threads (`thread_watcher.py:122-138`); for app threads today the webhook presumably sets
   tags. Web Phase 4 should apply `New` (existing tag) at thread creation so resolve-time tag
