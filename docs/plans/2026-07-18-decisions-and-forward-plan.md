@@ -4,6 +4,8 @@
 **Status:** Planned, not started (deliberately waiting on digilab-web phases)
 **Prereq reading:** `2026-07-16-request-flow-redesign-impact.md` (impact assessment),
 `digilab-web/docs/plans/2026-07-16-request-flow-redesign.md` (the web plan + its 2026-07-18 addendum)
+**Amended:** 2026-07-28 addendum below — multi-game direction, server channel plan, digest
+destination changed to a dedicated `#admin-digest` channel (supersedes Decision 1's destination).
 
 ## Decisions locked 2026-07-18
 
@@ -170,3 +172,157 @@ The answer to "users want DigiLab notifications in their own server" — without
 | Web Phases 3 & 5 | Nothing bot-side (role_sync picks up Phase 5 writes automatically) |
 | User demand for external-server notifications | Webhook-subscriptions feature in digilab-web (§5) |
 | User demand for external-server *commands* | Only then: separate public bot, API-backed |
+
+---
+
+# Addendum 2026-07-28 — Multi-game direction & server channel plan
+
+Discussed and agreed 2026-07-28. Context that changed since 2026-07-18:
+
+- **DigiLab is going multi-game.** Launch order: Gundam first, then One Piece / Fusion World /
+  Union Arena, Naruto when it exists. The Discord server becomes **the DigiLab platform server
+  for all games** — Discord stays the onboarding funnel (scene requests, admin onboarding);
+  the site is where the work happens.
+- **Per-game admin teams are a requirement.** Digimon-Dallas and Gundam-Dallas may be
+  different people; cross-game admins will exist but are the exception.
+- **§5 already shipped.** The "future sketch" webhook-subscriptions feature was built in
+  digilab-web on 2026-07-23 (`user_webhooks` / `user_webhook_subscriptions` /
+  `webhook_deliveries`, plan `digilab-web/docs/plans/2026-07-23-account-badges-and-discord-webhooks.md`).
+  §5 is no longer pending work — remaining gap is a **per-game filter on subscriptions**
+  (web-side), needed before a second game has results.
+
+## A1. Multi-game data model facts (digilab-web, verified against schema)
+
+- Scenes are **shared geography**: `scenes` has no game column; `scene_games (scene_id,
+  game_id, is_active)` flips a scene "online" per game (schema.sql:705). "Dallas" is one row.
+- `game_admin_roles (user_id, game_id, role)` is already per-game (schema.sql:438).
+- **The gap:** `admin_user_scenes` (schema.sql:112) and `admin_regions` (schema.sql:50) have
+  **no game column** — they can't express "admins Dallas *for Gundam*." This is the one
+  schema migration per-game admins force: add `game_id`, backfill `'digimon'` (same pattern
+  `admin_requests.game_id` used on 2026-07-08). Must land **before** the Phase 2 digest is
+  built, so the digest cascade is game-correct from day one, and belongs with web Phase 5
+  (the UI that writes these tables).
+
+## A2. Amended decision: digest destination is a dedicated `#admin-digest` channel
+
+Supersedes the destination clause of Decision 1 (2026-07-18: "the existing admin text
+channel"). The **forum-thread rejection stands unchanged** (nudge-loop harassment, archiver
+blindness, daily thread clutter — see §4).
+
+What changed: under multi-game the digest grows (per-game sections, more items, possibly
+multiple messages on busy days), and in a *chat* channel daily bot posts interleave with
+human conversation — the digest gets scrolled away and the "latest message = current state /
+silence = inbox zero" property erodes. The 2026-07-18 rejection of a dedicated channel was
+"fine but unnecessary"; multi-game makes it necessary. New spec:
+
+- **`#admin-digest`**: plain text channel, read-only for humans, visible to all admin roles.
+  `DISCORD_WEBHOOK_ADMIN_DIGEST` points here.
+- **One message per day covering all games, grouped by game** (e.g. `📋 Digimon: 3 data
+  errors · Gundam: 1 store request`), while volume allows. If a message approaches Discord
+  limits, split per game — harmless in a channel with no conversation to interrupt.
+- Ping policy unchanged from Decision 2 (fresh items named un-pinged; >72h stale items get
+  real `allowed_mentions`, per-item cascade **filtered by the request's `game_id`**).
+- Bot involvement: none (channel not in `FORUM_CHANNELS`), unchanged.
+
+## A3. Multi-game Discord decisions locked
+
+1. **Discord admin roles stay shared across games** (@Platform/@Regional/@Scene Admin).
+   The cascade pings *user IDs*, not roles — roles only gate channel visibility, and admin
+   channels are shared. Per-game role sets (3 × N games) buy nothing without per-game private
+   channels, which contradict the platform-server model. `role_sync` semantics become "max
+   role across any game" (union over `game_admin_roles`).
+2. **Forum channels stay shared; game tags on `#scene-requests` only.** It's the onboarding
+   funnel — "Scene Request: Portland" is meaningless without the game. One tag per game,
+   applied web-side at thread creation (same mechanism as the old continent tags).
+   - `#feature-requests`: **no game tags** — requests are overwhelmingly platform-level.
+   - `#bug-reports`: **no game tags** — the game-specific traffic there today (uncovered data
+     errors) stops threading entirely when Phase 2 ships; what remains is platform bugs.
+3. **`#scene-coordination` is scheduled for deletion** (it cannot be deleted yet): store
+   requests / covered data errors still thread there until web Phase 2; legacy threads must
+   drain; the weekly scene-health digest (`cogs/digest.py`) posts there; and the bot
+   fail-fasts on the env var. Path: Phase 2 ships → legacy drain → Bot PR 3 (below) →
+   delete channel. Continent tags die with it — game tags on #scene-requests take over.
+4. **Community game roles via native Discord onboarding** ("Channels & Roles"): members
+   self-select games at join → @Gundam etc. → shows game channels, makes announcement pings
+   consented. Completely separate namespace from the three synced admin roles (role_sync
+   only manages its three — no collision, but don't reuse names).
+5. **Per-game community channels are created lazily**: one text channel per game (e.g.
+   `#gundam`) when that community materializes, behind its onboarding role. Expand to a
+   category only under real traffic — empty per-game categories read as a dead server.
+6. **`#digilab-activity` stays one shared feed**; embeds stamp the game via the existing
+   `DiscordEmbed.author` field (added for this). Split per-game only if volume forces it.
+7. **Per-game results feeds in the home server dogfood user-webhooks**: create a webhook in
+   the game's channel, subscribe with a game/scene filter. Zero bot code; was listed as a
+   "good-fit future bot function" in §3, now a config task (pending the game filter, A0).
+8. **No game tags / no changes** for #general, #welcome, #rules, #supporters, #api,
+   #platform-admins, #admin-chat, #bot-log.
+
+## A4. Bot work plan additions (extends §1)
+
+**PR 3 — retire #scene-coordination (after Phase 2 + legacy drain).**
+- Rehome the weekly scene-health digest as a plain embed in an admin channel
+  (consolidating admin reporting; exact channel decided at PR time).
+- Remove `CHANNEL_SCENE_COORDINATION` and its tags from `config.py` / `FORUM_CHANNELS` /
+  `.env.example` (bot fail-fasts on missing env vars — deletion requires this PR first).
+- Then delete the channel server-side.
+
+**PR 4 — game-aware bot (needed by the time a second game's requests flow, not before;
+depends on the A1 schema migration).**
+- `db.py`: parameterize the five hardcoded `game_id = 'digimon'` joins (db.py:56, 113, 135,
+  151, 381) by the request row's `game_id`; cascade becomes
+  `get_admins_for_scene(scene_id, game_id)`; scope `admin_user_scenes` / `admin_regions`
+  joins by game once those tables carry it.
+- `reactions.py`: resolve-permission check scoped by the request's game.
+- `role_sync`: max-role-across-games union per A3.1.
+- `/admins`, `/roster`, `/scene`: optional game parameter (default: all games for the scene).
+
+**Web-side items recorded here for coordination:**
+- `admin_user_scenes` / `admin_regions` `game_id` migration (A1) — before Phase 2 digest.
+- Digest game-grouping + game-scoped cascade (A2).
+- Per-game subscription filter on user-webhooks — before second game's results.
+- `sendWelcomeDM` (`digilab-web/src/lib/discord.ts:522`) hardcodes DigiLab/Digimon branding
+  and channel names — read from `game-config` terminology before onboarding non-Digimon admins.
+- Game tag env vars for #scene-requests, stamped at thread creation per the request's game.
+
+## A5. Updated sequencing (supersedes the 2026-07-18 table where they conflict)
+
+| Order | Work |
+|---|---|
+| Now | Bot PR 0 (own-thread guard) |
+| Anytime | Web Phase 1 (Apply & Resolve) — game-agnostic |
+| Before Phase 2 | Schema migration: `game_id` on `admin_user_scenes` + `admin_regions` |
+| Web Phase 2 | Digest to new `#admin-digest` (A2), game-grouped; server: create channel + webhook. Bot PR 1 (cleanup, can lag) |
+| Web Phase 4 | Bot PR 2 (feature template); server: feature webhook + tag ID |
+| After Phase 2 + legacy drain | Bot PR 3 (retire #scene-coordination) |
+| Before 2nd game's requests flow | Bot PR 4 (game-aware bot); server: game tags on #scene-requests |
+| Before 2nd game's results | Web: per-game filter on user-webhook subscriptions |
+| When Gundam community materializes | Server: onboarding roles + `#gundam` channel; dogfooded results webhook |
+
+## A6. Production facts + digest bug found 2026-07-28 (expands PR 0)
+
+**Production is Railway, not the DigitalOcean droplet the docs described.** Project
+`datamon-bot` / service `datamon-bot` / env `production`, connected to
+`lopezmichael/datamon-bot` — push to `main` auto-deploys. `railway` CLI is linked in this
+repo; logs via `railway logs` (~1-week retention). README/DESIGN/NEXT_STEPS/CLAUDE.md were
+corrected and `systemd/` deleted on 2026-07-28.
+
+**The weekly scene-health digest has never fired — root cause found and verified:**
+`db.get_dormant_scenes` (db.py:295) selects `t.date` from `tournaments`, but the column is
+**`event_date`** (verified against the live DB 2026-07-28: `UndefinedColumnError`). Every
+Monday 09:00 UTC the `asyncio.gather` in `cogs/digest.py:44` throws, and an uncaught
+exception permanently kills a `discord.ext.tasks` loop — so the digest dies on the first
+Monday after each deploy and stays dead until the next restart. Non-Monday runs return
+before any logging, so the failure was invisible. Evidence: retained Railway logs
+(Jul 22–28) show zero digest lines, including Monday Jul 27 09:00 with the bot online
+(deploy of Jul 18 active); no digest thread has ever existed in #scene-coordination
+(~13 Mondays since the cog shipped 2026-04-30). This also explains why the PR 0 own-thread
+bug was never observed live — there were no own threads to welcome.
+
+**PR 0 scope (revised):**
+1. Fix `t.date` → `t.event_date` in `get_dormant_scenes`.
+2. Wrap the `weekly_digest` loop body so an exception can't kill the loop (log + continue);
+   audit `nudge`/`archiver`/`role_sync` loops for the same fragility while there.
+3. The original own-thread guard in `on_thread_create` (`thread.owner_id == bot.user.id`) —
+   needed *because* the digest will now actually post.
+4. Heads-up at deploy: the first successful digest may be large (60+ days of dormant scenes
+   and unassigned scenes have never been reported).

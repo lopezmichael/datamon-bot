@@ -55,8 +55,8 @@ The bot completes the loop: Discord → App sync, role management, slash command
 | Runtime | Python 3.12+ | discord.py ecosystem, easy deployment |
 | Discord lib | discord.py 2.x | Mature, well-documented, async-native |
 | Database | asyncpg → Neon PostgreSQL | Async Postgres driver, same DB as app |
-| Hosting | DigitalOcean Droplet ($6/mo) | Simple, persistent process, SSH access |
-| Process mgr | systemd | Auto-restart, logging, standard Linux |
+| Hosting | Railway (Hobby) | Auto-deploy from GitHub `main`, no server to manage |
+| Process mgr | Railway | Auto-restart, stdout log capture |
 | Config | `.env` + python-dotenv | Same pattern as digilab-app |
 
 ---
@@ -329,8 +329,6 @@ datamon-bot/
 ├── utils.py                # Shared utilities (webhook logging)
 ├── requirements.txt        # discord.py, asyncpg, python-dotenv
 ├── .env.example            # Template for required env vars
-├── systemd/
-│   └── datamon.service     # systemd unit file for deployment
 └── README.md               # Setup, deployment, commands reference
 ```
 
@@ -351,52 +349,13 @@ See `.env.example` for the full list with comments. Key groups:
 
 ## Deployment
 
-### DigitalOcean Droplet
+*(Updated 2026-07-28 — the original DigitalOcean/systemd design was superseded before it was
+ever used; production has been Railway.)*
 
-```bash
-# Ubuntu 24.04, $6/mo (1 vCPU, 1GB RAM)
-# More than enough — bot uses <50MB RAM
-
-# Setup
-sudo apt update && sudo apt install python3.12 python3.12-venv
-git clone <repo>
-cd datamon-bot
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env  # fill in values
-
-# Test
-python bot.py
-
-# Deploy as systemd service
-sudo cp systemd/datamon.service /etc/systemd/system/
-sudo systemctl enable datamon
-sudo systemctl start datamon
-
-# Logs
-journalctl -u datamon -f
-```
-
-### systemd Unit File
-
-```ini
-[Unit]
-Description=Datamon Discord Bot
-After=network.target
-
-[Service]
-Type=simple
-User=datamon
-WorkingDirectory=/home/datamon/datamon-bot
-ExecStart=/home/datamon/datamon-bot/.venv/bin/python bot.py
-Restart=always
-RestartSec=10
-EnvironmentFile=/home/datamon/datamon-bot/.env
-
-[Install]
-WantedBy=multi-user.target
-```
+Railway project `datamon-bot` (service `datamon-bot`, environment `production`), connected to
+the `lopezmichael/datamon-bot` GitHub repo. Pushing to `main` builds and deploys automatically.
+Env vars live in the Railway dashboard, mirroring `.env.example`. Logs: `railway logs`
+(stdout capture, roughly 1-week retention).
 
 ---
 
@@ -409,7 +368,7 @@ WantedBy=multi-user.target
 | 3 | Role sync (periodic task) | Medium |
 | 4 | React-to-resolve | Medium |
 | 5 | Auto-archive stale threads | Small |
-| 6 | Deploy to DigitalOcean + systemd | Small |
+| 6 | Deploy (shipped on Railway) | Small |
 
 Phase 1–2 first for immediate utility. Phase 3–4 for automation. Phase 5–6 for production.
 
@@ -428,8 +387,7 @@ Phase 1–2 first for immediate utility. Phase 3–4 for automation. Phase 5–6
 
 ## Monitoring
 
-- **Systemd**: `systemctl status datamon`, auto-restart on crash
-- **Logging**: Python `logging` module → stdout → journald
+- **Railway**: `railway status` / `railway logs`; auto-restart on crash
+- **Logging**: Python `logging` module → stdout → Railway log capture (~1-week retention)
 - **Health check**: Bot sets a custom status ("Watching N scenes") updated every 5 minutes alongside role sync
 - **Error tracking**: Log errors to a `#bot-log` channel in the OPS category (simple webhook, not Sentry)
-- **Uptime**: DigitalOcean monitoring alerts if droplet goes down

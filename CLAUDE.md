@@ -32,8 +32,6 @@ cogs/
   archiver.py       # 1-hr loop: archives stale resolved threads
   nudge.py          # 24-hr loop: nudges stale unresolved threads (3 days)
   digest.py         # Weekly scene health digest (Mondays 09:00 UTC)
-systemd/
-  datamon.service   # Production systemd unit file
 ```
 
 ## Key Conventions
@@ -43,7 +41,7 @@ systemd/
 - Database queries live in `db.py` — cogs call helpers, not raw SQL
 - Bot is **read-only** on the database except for `UPDATE admin_requests SET status='resolved'`
 - Discord rate limits: role_sync adds 1-second delays between role changes
-- Logging goes to stdout via Python `logging` module; production uses journald
+- Logging goes to stdout via Python `logging` module; Railway captures stdout (short retention, ~1 week)
 
 ## Commands
 
@@ -62,4 +60,4 @@ No automated test suite. Verification is manual against a live Discord server �
 
 ## Deployment
 
-Production target: DigitalOcean droplet (Ubuntu, $6/mo). Managed via systemd (`systemd/datamon.service`). See `README.md` for full deployment steps.
+Production runs on **Railway** (project `datamon-bot`, connected to the GitHub repo) — pushing to `main` auto-deploys. Logs via `railway logs` (CLI is linked in this repo). See `README.md` for details.

@@ -90,35 +90,9 @@ Start the bot locally: `source .venv/bin/activate && python bot.py`
 
 ## Deployment
 
-The bot currently runs on your laptop. To run it persistently:
-
-### Option A: VPS (recommended)
-
-1. Provision a small Linux VPS (Ubuntu 22.04+, 1 vCPU, 512MB RAM is plenty)
-2. Install Python 3.12+
-3. Copy the project:
-   ```bash
-   scp -r /Users/michaellopez/repos/datamon-bot user@server:/opt/datamon-bot/
-   ```
-4. On the server:
-   ```bash
-   cd /opt/datamon-bot
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-5. Copy your `.env` to the server (securely — don't commit it)
-6. Install the systemd service:
-   ```bash
-   sudo cp systemd/datamon.service /etc/systemd/system/
-   sudo systemctl daemon-reload
-   sudo systemctl enable --now datamon
-   ```
-7. Monitor: `sudo journalctl -u datamon -f`
-
-### Option B: Same server as digilab-app
-
-If digilab-app already runs on a server, deploy alongside it. Same steps as above.
+**Done (2026-07-28 status):** production runs on Railway, auto-deploying from pushes to `main`
+on `lopezmichael/datamon-bot`. Monitor with `railway logs` (CLI linked in this repo). The old
+VPS/systemd instructions are obsolete and the systemd unit has been removed.
 
 ---
 

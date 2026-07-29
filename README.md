@@ -59,16 +59,24 @@ cogs/
 
 ## Deployment
 
-```bash
-# Copy files to server
-scp -r . datamon@server:/opt/datamon-bot/
+Production runs on [Railway](https://railway.app) (project `datamon-bot`, service `datamon-bot`,
+environment `production`), connected to the `lopezmichael/datamon-bot` GitHub repo — **pushing to
+`main` auto-deploys**. There is no server to SSH into.
 
-# Install and enable service
-sudo cp systemd/datamon.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now datamon
-sudo journalctl -u datamon -f
+```bash
+# One-time setup on a new machine
+brew install railway
+railway login
+railway link          # pick the datamon-bot project/service
+
+# Day to day
+railway status        # deploy state
+railway logs          # stdout logs (retention is short — about a week)
+railway logs --lines 5000 | grep -i <term>
 ```
+
+Environment variables are managed in the Railway dashboard (Variables tab), mirroring
+`.env.example`.
 
 ## Forum Channel Mapping
 
