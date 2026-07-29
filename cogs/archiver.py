@@ -8,7 +8,8 @@ import discord
 from discord.ext import commands, tasks
 
 import config
-from utils import TRANSIENT_LOOP_EXCEPTIONS, log_to_discord
+import db
+from utils import TRANSIENT_LOOP_EXCEPTIONS, apply_resolve_tag, log_to_discord
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +23,13 @@ COMPLETION_TAGS: dict[int, timedelta] = {
     config.TAG_NOT_PLANNED: timedelta(weeks=1),
     config.TAG_ON_HOLD: timedelta(weeks=1),
 }
+
+# `admin_requests.status` has no CHECK constraint. Alongside pending/resolved/
+# rejected, production still holds the pre-2026 terminal pair approved (30 rows)
+# and dismissed (3 rows) — see digilab-web `src/lib/admin-requests.test.ts`.
+# They are terminal too, so heal them the same way. Anything else is left alone.
+RESOLVED_STATUSES = {"resolved", "approved"}
+REJECTED_STATUSES = {"rejected", "dismissed"}
 
 
 class Archiver(commands.Cog):
@@ -61,8 +69,10 @@ class Archiver(commands.Cog):
 
         now = datetime.now(timezone.utc)
         archived: list[str] = []
+        healed: list[str] = []
+        healed_rejected: list[str] = []
 
-        for channel_id in config.FORUM_CHANNELS:
+        for channel_id, forum_config in config.FORUM_CHANNELS.items():
             forum = guild.get_channel(channel_id)
             if not forum or not isinstance(forum, discord.ForumChannel):
                 continue
@@ -75,6 +85,19 @@ class Archiver(commands.Cog):
                 tag_ids = {t.id for t in thread.applied_tags} if thread.applied_tags else set()
                 matching = tag_ids & COMPLETION_TAGS.keys()
                 if not matching:
+                    # No completion tag — but the app may have closed the
+                    # request without tagging (its tagging is fire-and-forget).
+                    # Heal it here; the next pass archives it normally.
+                    # Healing touches the DB and Discord, so it is isolated:
+                    # one bad thread or a Neon blip must not abort the pass or
+                    # lose the batch summary. Archiving already-tagged threads
+                    # needs no DB at all and must keep working regardless.
+                    try:
+                        await self._heal_thread(
+                            guild, thread, forum_config, healed, healed_rejected
+                        )
+                    except Exception:
+                        log.exception("Heal failed for thread %s", thread.id)
                     continue
 
                 # Use the shortest threshold among matching tags
@@ -95,10 +118,75 @@ class Archiver(commands.Cog):
                 except discord.Forbidden:
                     log.warning("Cannot archive thread %s", thread.name)
 
+        if healed:
+            msg = "**Healed (resolved in app, tag applied)**\n" + "\n".join(
+                f"• {name}" for name in healed
+            )
+            await log_to_discord(msg)
+            log.info("Healed %d resolved-but-untagged threads", len(healed))
+        if healed_rejected:
+            msg = "**Healed (rejected in app, tag applied)**\n" + "\n".join(
+                f"• {name}" for name in healed_rejected
+            )
+            await log_to_discord(msg)
+            log.info("Healed %d rejected-but-untagged threads", len(healed_rejected))
         if archived:
             msg = "**Auto-Archive**\n" + "\n".join(f"• {name}" for name in archived)
             await log_to_discord(msg)
             log.info("Archived %d threads", len(archived))
+
+    async def _heal_thread(
+        self,
+        guild: discord.Guild,
+        thread: discord.Thread,
+        forum_config: dict,
+        healed: list[str],
+        healed_rejected: list[str],
+    ) -> None:
+        """Tag a thread whose request is already finished in the app.
+
+        Only called for threads missing the channel's completion tag. Threads
+        with no DB row (manual threads, digest threads) are left alone, as are
+        requests in any still-open status.
+
+        Both outcomes do the same thing — apply a completion tag and hand the
+        thread back to the normal tag-driven threshold path — because that is
+        the contract the web app implements. `resolveDiscordThread`
+        (digilab-web `src/lib/discord.ts`) applies `rejectTag ?? resolveTag` on a
+        rejection, so healing a row the app rejected must land on the same tag
+        the app would have applied. Won't Fix / Not Planned archive after a week,
+        the resolve tags after 48 hours.
+
+        Archiving the thread directly instead would have been wrong: Discord
+        un-archives a thread the moment anyone replies, and the thread would come
+        back still untagged — so the next hourly pass re-archives it, forever.
+        A completion tag is durable; an archived flag is not.
+        """
+        # Skip the bot's own threads before touching the DB. The weekly digest
+        # posts into #scene-coordination and never has a request row, so every
+        # one of those would otherwise cost a query per thread per hour forever.
+        if self.bot.user and thread.owner_id == self.bot.user.id:
+            return
+
+        request = await db.get_request_by_thread(self.bot.pool, str(thread.id))
+        if not request:
+            return
+
+        status = request["status"]
+
+        if status in RESOLVED_STATUSES:
+            if await apply_resolve_tag(thread, guild, forum_config):
+                healed.append(thread.name)
+                log.info("Healed thread %s — resolved in app but untagged", thread.id)
+                await asyncio.sleep(1)
+            return
+
+        if status in REJECTED_STATUSES:
+            tag_id = forum_config.get("reject_tag") or forum_config["resolve_tag"]
+            if await apply_resolve_tag(thread, guild, forum_config, tag_id):
+                healed_rejected.append(thread.name)
+                log.info("Healed thread %s — rejected in app but untagged", thread.id)
+                await asyncio.sleep(1)
 
     @archive_stale.before_loop
     async def before_archive(self) -> None:

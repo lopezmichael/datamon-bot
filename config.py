@@ -51,7 +51,13 @@ TAG_NEEDS_MORE_INFO_SCENE_REQUESTS: int = _require_int("DISCORD_TAG_NEEDS_MORE_I
 TAG_NEEDS_ADMIN_SCENE_REQUESTS: int = _require_int("DISCORD_TAG_NEEDS_ADMIN_SCENE_REQUESTS")
 TAG_ON_HOLD: int = _require_int("DISCORD_TAG_ON_HOLD")
 
-# Forum channel → resolve config mapping
+# Forum channel → resolve config mapping.
+#
+# `reject_tag` is the channel's distinct "won't do" completion tag, mirroring
+# `CHANNEL_ENV` in digilab-web `src/lib/discord.ts`: a rejection applies
+# `reject_tag ?? resolve_tag`. Only #bug-reports has one there (Won't Fix);
+# #feature-requests is absent from the web map entirely (the app does not thread
+# to it yet), so nothing to mirror. No new env vars — every ID already exists.
 FORUM_CHANNELS: dict[int, dict] = {
     CHANNEL_SCENE_COORDINATION: {
         "resolve_tag": TAG_RESOLVED,
@@ -67,6 +73,7 @@ FORUM_CHANNELS: dict[int, dict] = {
     },
     CHANNEL_BUG_REPORTS: {
         "resolve_tag": TAG_FIXED,
+        "reject_tag": TAG_WONT_FIX,
         "new_tag": TAG_NEW_BUG_REPORTS,
         "initial_tags": [TAG_NEW_BUG_REPORTS, TAG_UNDER_REVIEW_BUG_REPORTS, TAG_CONFIRMED_BUG_REPORTS],
         "label": "Fixed",
