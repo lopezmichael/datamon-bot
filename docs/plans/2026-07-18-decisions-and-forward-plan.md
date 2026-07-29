@@ -315,6 +315,13 @@ silence = inbox zero" property erodes. The 2026-07-18 rejection of a dedicated c
 - `sendWelcomeDM` (`digilab-web/src/lib/discord.ts:522`) hardcodes DigiLab/Digimon branding
   and channel names — read from `game-config` terminology before onboarding non-Digimon admins.
 - Game tag env vars for #scene-requests, stamped at thread creation per the request's game.
+- **Webhook identities (small, anytime):** give every webhook post a proper name + avatar
+  instead of the manually-set Integrations-tab defaults. Cheapest path is per-message:
+  Discord webhook payloads accept `username` and `avatar_url` — the bot's `log_to_discord`
+  already sends `username="Datamon Bot"`; digilab-web's `discordSend` sends neither. Add
+  optional username/avatar params there and stamp each sender (e.g. "DigiLab Requests",
+  "DigiLab Digest") with a hosted icon URL. Covers all five web webhooks + future digest
+  in one change; no Discord-side edits needed.
 
 ## A5. Updated sequencing (supersedes the 2026-07-18 table where they conflict)
 
