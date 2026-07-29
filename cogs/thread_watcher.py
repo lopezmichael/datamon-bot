@@ -74,10 +74,8 @@ class ThreadWatcher(commands.Cog):
         # scene_request (#scene-requests) and bug_report (#bug-reports), and both are
         # scene-less in practice, so this normally takes the global branch. The cascade
         # stays because the branch is data-driven, not channel-driven: any row that does
-        # carry a scene_id still routes by scene. #scene-coordination no longer receives
-        # app threads at all — store_request / data_error go to the admin UI and the daily
-        # #admin-digest — but legacy threads created before the shutoff are still open
-        # there and still resolve through the reaction and archiver paths.
+        # carry a scene_id still routes by scene. (store_request / data_error stopped
+        # threading entirely — they flow through the admin UI and the daily #admin-digest.)
         if request["scene_id"]:
             admin_ids = [
                 a["discord_user_id"]

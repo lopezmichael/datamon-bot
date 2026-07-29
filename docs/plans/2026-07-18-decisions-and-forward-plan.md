@@ -279,6 +279,10 @@ silence = inbox zero" property erodes. The 2026-07-18 rejection of a dedicated c
 ## A4. Bot work plan additions (extends §1)
 
 **PR 3 — retire #scene-coordination (after Phase 2 + legacy drain).**
+*Built 2026-07-29 (committed, not pushed): digest rehomed to #admin-digest via
+`DISCORD_WEBHOOK_ADMIN_DIGEST` (already set in Railway + local .env), channel/tag config
+stripped. Push = deploy, gated on the 10-row legacy queue reaching zero. After deploy: delete
+the Discord channel.*
 - Rehome the weekly scene-health digest as a plain embed in an admin channel
   (consolidating admin reporting; exact channel decided at PR time).
 - Remove `CHANNEL_SCENE_COORDINATION` and its tags from `config.py` / `FORUM_CHANNELS` /

@@ -29,13 +29,11 @@ ROLE_REGIONAL_ADMIN: int = _require_int("DISCORD_ROLE_REGIONAL_ADMIN")
 ROLE_SCENE_ADMIN: int = _require_int("DISCORD_ROLE_SCENE_ADMIN")
 
 # Channel IDs
-CHANNEL_SCENE_COORDINATION: int = _require_int("DISCORD_CHANNEL_SCENE_COORDINATION")
 CHANNEL_SCENE_REQUESTS: int = _require_int("DISCORD_CHANNEL_SCENE_REQUESTS")
 CHANNEL_BUG_REPORTS: int = _require_int("DISCORD_CHANNEL_BUG_REPORTS")
 CHANNEL_FEATURE_REQUESTS: int = _require_int("DISCORD_CHANNEL_FEATURE_REQUESTS")
 
 # Forum tag IDs
-TAG_RESOLVED: int = _require_int("DISCORD_TAG_RESOLVED")
 TAG_ONBOARDED: int = _require_int("DISCORD_TAG_ONBOARDED")
 TAG_FIXED: int = _require_int("DISCORD_TAG_FIXED")
 TAG_SHIPPED: int = _require_int("DISCORD_TAG_SHIPPED")
@@ -59,11 +57,6 @@ TAG_ON_HOLD: int = _require_int("DISCORD_TAG_ON_HOLD")
 # #feature-requests is absent from the web map entirely (the app does not thread
 # to it yet), so nothing to mirror. No new env vars — every ID already exists.
 FORUM_CHANNELS: dict[int, dict] = {
-    CHANNEL_SCENE_COORDINATION: {
-        "resolve_tag": TAG_RESOLVED,
-        "label": "Resolved",
-        "channel_type": "scene_coordination",
-    },
     CHANNEL_SCENE_REQUESTS: {
         "resolve_tag": TAG_ONBOARDED,
         "new_tag": TAG_NEW_SCENE_REQUESTS,
@@ -109,6 +102,10 @@ TAG_ENV_NAMES: dict[int, str] = _env_names("TAG_")
 
 # Webhook for #bot-log
 WEBHOOK_BOT_LOG: str = _require("DISCORD_WEBHOOK_BOT_LOG")
+
+# Webhook for #admin-digest — the weekly scene-health digest posts here. The web
+# app's daily request digest posts to the same channel via its own env var.
+WEBHOOK_ADMIN_DIGEST: str = _require("DISCORD_WEBHOOK_ADMIN_DIGEST")
 
 # Neon PostgreSQL
 NEON_HOST: str = _require("NEON_HOST")

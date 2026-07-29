@@ -67,7 +67,7 @@ Full server structure documented in `digilab-app/docs/plans/2026-02-26-discord-s
 
 | Channel | Type | Bot Interaction |
 |---------|------|----------------|
-| `#scene-coordination` | Forum | React-to-resolve, auto-archive, tag management, weekly health digest |
+| `#admin-digest` | Text | Weekly scene-health digest (webhook post; the web app's daily request digest shares the channel) |
 | `#scene-requests` | Forum | Tag updates on onboarding, status tag stripping, stale nudges |
 | `#bug-reports` | Forum | Tag updates on fix, status tag stripping, stale nudges |
 | `#feature-requests` | Forum | Tag updates on ship, status tag stripping |
@@ -83,9 +83,8 @@ admins pinged only on items older than 72 hours. The bot has no part in that pat
 channel is a text channel and isn't in `FORUM_CHANNELS`, so every listener ignores it.
 
 Scene requests and bug reports thread exactly as before, into `#scene-requests` and
-`#bug-reports`. `#scene-coordination` now receives only manual admin discussion, the legacy
-app threads still open from before the shutoff, and the bot's weekly health digest — it stays
-fully wired for those until the legacy threads drain and the channel is retired.
+`#bug-reports`. `#scene-coordination` was retired once its legacy threads drained (2026-07-29):
+the bot no longer references it, and the weekly health digest moved to `#admin-digest`.
 
 Startup check: the bot verifies every channel and tag ID in `FORUM_CHANNELS` against the live
 guild once at boot, logging mismatches and posting them to `#bot-log`. It is non-fatal, and it
@@ -261,7 +260,7 @@ All commands are guild-only (no DM usage).
 **Purpose:** Scene admins resolve requests directly from Discord by reacting to the thread's first message.
 
 **Trigger:** ✅ reaction on the first message of a thread in any tracked forum channel
-(`#scene-coordination`, `#scene-requests`, `#bug-reports`, `#feature-requests`).
+(`#scene-requests`, `#bug-reports`, `#feature-requests`).
 
 **Flow:**
 ```
@@ -314,7 +313,7 @@ All commands are guild-only (no DM usage).
 - Runs every Monday at 09:00 UTC
 - Queries for: dormant scenes (no tournaments in 60+ days), scenes with no assigned admin, stores deactivated in the past week
 - If nothing to report, skips the post entirely
-- Creates a forum thread in `#scene-coordination` with the digest
+- Posts the digest to `#admin-digest` via webhook (single message, mentions included)
 - Follow-up message mentions only the admins relevant to each flagged scene (not everyone)
 
 ### 5. Welcome DM Delivery
@@ -359,7 +358,7 @@ See `.env.example` for the full list with comments. Key groups:
 
 - **Discord Bot** — `DISCORD_BOT_TOKEN`, `DISCORD_GUILD_ID`
 - **Role IDs** — `DISCORD_ROLE_PLATFORM_ADMIN`, `DISCORD_ROLE_REGIONAL_ADMIN`, `DISCORD_ROLE_SCENE_ADMIN`
-- **Channel IDs** — `DISCORD_CHANNEL_SCENE_COORDINATION`, `DISCORD_CHANNEL_SCENE_REQUESTS`, `DISCORD_CHANNEL_BUG_REPORTS`, `DISCORD_CHANNEL_FEATURE_REQUESTS`
+- **Channel IDs** — `DISCORD_CHANNEL_SCENE_REQUESTS`, `DISCORD_CHANNEL_BUG_REPORTS`, `DISCORD_CHANNEL_FEATURE_REQUESTS`
 - **Forum Tag IDs** — Resolve tags (Resolved, Onboarded, Fixed, Shipped), status tags (New, Under Review, Confirmed, Planned, Needs More Info, Needs Admin), terminal tags (Won't Fix, Not Planned, On Hold)
 - **Webhook** — `DISCORD_WEBHOOK_BOT_LOG`
 - **Database** — `NEON_HOST`, `NEON_DATABASE`, `NEON_USER`, `NEON_PASSWORD`

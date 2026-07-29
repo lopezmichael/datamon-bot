@@ -81,7 +81,7 @@ Start the bot locally: `source .venv/bin/activate && python bot.py`
 ### 8. Weekly Scene Health Digest
 
 1. Runs automatically on Mondays at 09:00 UTC
-2. **Expected:** Bot creates a forum thread in `#scene-coordination` with sections for dormant scenes, unassigned scenes, and deactivated stores
+2. **Expected:** Bot posts a webhook message to `#admin-digest` with sections for dormant scenes, unassigned scenes, and deactivated stores
 3. Follow-up message mentions relevant admins for each flagged scene
 4. If all scenes are healthy, no thread is created
 5. To test: temporarily change the weekday check in `cogs/digest.py`

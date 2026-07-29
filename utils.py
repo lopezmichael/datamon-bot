@@ -61,19 +61,24 @@ def _chunk_message(message: str, limit: int = MAX_LOG_CHARS) -> list[str]:
     return chunks
 
 
-async def log_to_discord(message: str) -> None:
-    """Post a message to #bot-log via webhook. Fire-and-forget.
+async def post_webhook(url: str, message: str, username: str = "Datamon Bot") -> None:
+    """POST a message to a Discord webhook. Fire-and-forget.
 
     Messages over the webhook size limit are split across several posts, sent
     in order over one session.
     """
     try:
         async with aiohttp.ClientSession() as session:
-            webhook = discord.Webhook.from_url(config.WEBHOOK_BOT_LOG, session=session)
+            webhook = discord.Webhook.from_url(url, session=session)
             for chunk in _chunk_message(message):
-                await webhook.send(chunk, username="Datamon Bot")
+                await webhook.send(chunk, username=username)
     except Exception:
-        log.exception("Failed to log to Discord")
+        log.exception("Failed to post to webhook")
+
+
+async def log_to_discord(message: str) -> None:
+    """Post a message to #bot-log via webhook. Fire-and-forget."""
+    await post_webhook(config.WEBHOOK_BOT_LOG, message)
 
 
 async def check_forum_config(guild: discord.Guild) -> None:

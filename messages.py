@@ -4,11 +4,9 @@
 # App-created thread messages (thread has a matching admin_requests record)
 # ---------------------------------------------------------------------------
 
-# No "scene_coordination" key: since the web app's Phase 2 deploy it no longer
-# threads store_request / data_error anywhere — those flow through the admin UI
-# and the daily #admin-digest instead. The channel keeps its manual welcome
-# below; a legacy app thread reaching the watcher falls through to the generic
-# fallback in `cogs/thread_watcher.py`.
+# No "scene_coordination" key anywhere in this file: the channel was retired
+# after the web app's Phase 2 deploy (store_request / data_error flow through
+# the admin UI and the daily #admin-digest) and its legacy threads drained.
 _APP_MESSAGES: dict[str, dict[str, str]] = {
     "scene_requests": {
         "scene_request": (
@@ -55,22 +53,6 @@ def app_thread_message(channel_type: str, request_type: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 _MANUAL_MESSAGES: dict[str, str] = {
-    "scene_coordination": (
-        "\U0001f44b **Welcome to Scene Coordination!**\n"
-        "\n"
-        "This channel is for scene admins to discuss anything related to managing "
-        "their scenes \u2014 data corrections, reorganizing scenes, general questions, "
-        "or anything else.\n"
-        "\n"
-        "**Tips:**\n"
-        "\u2022 Tag the relevant scene admins if you need their attention \u2014 "
-        "check `/admins <scene>` to find them\n"
-        "\u2022 For data errors, the fastest route is the **Report Error** button "
-        "in the app \u2014 it creates a tracked request and notifies the right admins "
-        "automatically\n"
-        "\u2022 When your question or issue is resolved, react \u2705 on the first "
-        "message to mark it done"
-    ),
     "scene_requests": (
         "\U0001f44b **Welcome to Scene Requests!**\n"
         "\n"
@@ -83,8 +65,8 @@ _MANUAL_MESSAGES: dict[str, str] = {
         "\n"
         "A platform admin has been notified and will review your request here.\n"
         "\n"
-        "**Looking to add a store to an existing scene?** Head over to "
-        "#scene-coordination instead."
+        "**Looking to add a store to an existing scene?** Use the store request "
+        "form on the DigiLab site instead — it goes straight to the admin queue."
     ),
     "bug_reports": (
         "\U0001f44b **Thanks for reporting a bug!**\n"

@@ -15,7 +15,6 @@ log = logging.getLogger(__name__)
 
 # Tag IDs that indicate a thread is "done", with their archive delay
 COMPLETION_TAGS: dict[int, timedelta] = {
-    config.TAG_RESOLVED: timedelta(hours=48),
     config.TAG_ONBOARDED: timedelta(hours=48),
     config.TAG_FIXED: timedelta(hours=48),
     config.TAG_SHIPPED: timedelta(hours=48),
@@ -162,9 +161,10 @@ class Archiver(commands.Cog):
         back still untagged — so the next hourly pass re-archives it, forever.
         A completion tag is durable; an archived flag is not.
         """
-        # Skip the bot's own threads before touching the DB. The weekly digest
-        # posts into #scene-coordination and never has a request row, so every
-        # one of those would otherwise cost a query per thread per hour forever.
+        # Skip the bot's own threads before touching the DB — they never have a
+        # request row, so each would otherwise cost a query per thread per hour
+        # forever. (Purely defensive since the weekly digest moved to a webhook
+        # post; the bot creates no forum threads today.)
         if self.bot.user and thread.owner_id == self.bot.user.id:
             return
 
