@@ -39,7 +39,7 @@ cogs/
 - **Python 3.12+**, async throughout (discord.py + asyncpg)
 - All config via environment variables loaded in `config.py` — never hardcode IDs or secrets
 - Database queries live in `db.py` — cogs call helpers, not raw SQL
-- Bot is **read-only** on the database except for `UPDATE admin_requests SET status='resolved'`
+- Bot is **read-only** on the database except for `UPDATE admin_requests SET status='resolved'` — enforced at the DB level since 2026-07-29: the `datamon_bot` Postgres role has SELECT everywhere and column-level UPDATE on `admin_requests(status, resolved_at, resolved_by)` only
 - Discord rate limits: role_sync adds 1-second delays between role changes
 - Logging goes to stdout via Python `logging` module; Railway captures stdout (short retention, ~1 week)
 
