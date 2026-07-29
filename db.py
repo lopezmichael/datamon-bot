@@ -292,14 +292,14 @@ async def get_dormant_scenes(pool: asyncpg.Pool, days: int = 60) -> list[asyncpg
     return await pool.fetch(
         """
         SELECT s.scene_id, s.display_name,
-               MAX(t.date) AS last_tournament
+               MAX(t.event_date) AS last_tournament
         FROM scenes s
         LEFT JOIN stores st ON st.scene_id = s.scene_id
         LEFT JOIN tournaments t ON t.store_id = st.store_id
         WHERE s.scene_type IN ('metro', 'online') AND s.is_active = TRUE
         GROUP BY s.scene_id, s.display_name
-        HAVING MAX(t.date) IS NULL OR MAX(t.date) < CURRENT_DATE - $1 * INTERVAL '1 day'
-        ORDER BY MAX(t.date) NULLS FIRST
+        HAVING MAX(t.event_date) IS NULL OR MAX(t.event_date) < CURRENT_DATE - $1 * INTERVAL '1 day'
+        ORDER BY MAX(t.event_date) NULLS FIRST
         """,
         days,
     )

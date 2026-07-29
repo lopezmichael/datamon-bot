@@ -19,6 +19,11 @@ class ThreadWatcher(commands.Cog):
 
     @commands.Cog.listener()
     async def on_thread_create(self, thread: discord.Thread) -> None:
+        # Skip threads we posted ourselves (e.g. the weekly digest). App threads come
+        # from a webhook, whose owner_id is the webhook's — not the bot user's.
+        if self.bot.user and thread.owner_id == self.bot.user.id:
+            return
+
         # Only watch tracked forum channels
         if thread.parent_id not in config.FORUM_CHANNELS:
             return

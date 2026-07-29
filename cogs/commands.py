@@ -8,6 +8,7 @@ from discord.ext import commands, tasks
 
 import config
 import db
+from utils import TRANSIENT_LOOP_EXCEPTIONS, log_to_discord
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class Commands(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.scene_cache: list[tuple[str, str]] = []  # (slug, display_name)
+        self._failure_alerted = False
 
     async def cog_load(self) -> None:
         await self._refresh_cache()
@@ -37,7 +39,23 @@ class Commands(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def refresh_scene_cache(self) -> None:
-        await self._refresh_cache()
+        # An exception escaping the loop body kills the loop permanently,
+        # freezing scene autocomplete on a stale cache
+        try:
+            await self._refresh_cache()
+        except TRANSIENT_LOOP_EXCEPTIONS:
+            # Let discord.ext.tasks retry these with its own backoff
+            raise
+        except Exception:
+            log.exception("Scene cache refresh failed")
+            if not self._failure_alerted:
+                self._failure_alerted = True
+                await log_to_discord(
+                    "⚠️ Scene cache refresh loop failed — check `railway logs`. "
+                    "Alerting once until it recovers."
+                )
+            return
+        self._failure_alerted = False
 
     @refresh_scene_cache.before_loop
     async def before_refresh(self) -> None:

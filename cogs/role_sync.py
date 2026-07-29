@@ -8,7 +8,7 @@ from discord.ext import commands, tasks
 
 import config
 import db
-from utils import log_to_discord
+from utils import TRANSIENT_LOOP_EXCEPTIONS, log_to_discord
 
 log = logging.getLogger(__name__)
 
@@ -16,6 +16,7 @@ log = logging.getLogger(__name__)
 class RoleSync(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._failure_alerted = False
 
     async def cog_load(self) -> None:
         self.sync_roles.start()
@@ -25,6 +26,24 @@ class RoleSync(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def sync_roles(self) -> None:
+        # An exception escaping the loop body kills the loop permanently
+        try:
+            await self._run_sync()
+        except TRANSIENT_LOOP_EXCEPTIONS:
+            # Let discord.ext.tasks retry these with its own backoff
+            raise
+        except Exception:
+            log.exception("Role sync run failed")
+            if not self._failure_alerted:
+                self._failure_alerted = True
+                await log_to_discord(
+                    "⚠️ Role sync loop failed — check `railway logs`. "
+                    "Alerting once until it recovers."
+                )
+            return
+        self._failure_alerted = False
+
+    async def _run_sync(self) -> None:
         guild = self.bot.get_guild(config.GUILD_ID)
         if not guild:
             log.warning("Guild %s not found", config.GUILD_ID)

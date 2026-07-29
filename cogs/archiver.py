@@ -8,7 +8,7 @@ import discord
 from discord.ext import commands, tasks
 
 import config
-from utils import log_to_discord
+from utils import TRANSIENT_LOOP_EXCEPTIONS, log_to_discord
 
 log = logging.getLogger(__name__)
 
@@ -27,6 +27,7 @@ COMPLETION_TAGS: dict[int, timedelta] = {
 class Archiver(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self._failure_alerted = False
 
     async def cog_load(self) -> None:
         self.archive_stale.start()
@@ -36,6 +37,24 @@ class Archiver(commands.Cog):
 
     @tasks.loop(hours=1)
     async def archive_stale(self) -> None:
+        # An exception escaping the loop body kills the loop permanently
+        try:
+            await self._run_archive()
+        except TRANSIENT_LOOP_EXCEPTIONS:
+            # Let discord.ext.tasks retry these with its own backoff
+            raise
+        except Exception:
+            log.exception("Archive run failed")
+            if not self._failure_alerted:
+                self._failure_alerted = True
+                await log_to_discord(
+                    "⚠️ Archive loop failed — check `railway logs`. "
+                    "Alerting once until it recovers."
+                )
+            return
+        self._failure_alerted = False
+
+    async def _run_archive(self) -> None:
         guild = self.bot.get_guild(config.GUILD_ID)
         if not guild:
             return
