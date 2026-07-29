@@ -407,3 +407,89 @@ our own loops), and both are independent of every web phase, so nothing gates th
    in an edge function that only ever sees its own three channels. It covers the web app's IDs
    transitively as well, since theirs are copied verbatim from ours — the residual risk is a
    bad transcription into their Vercel env, which is a deploy-time check, not a runtime one.
+
+---
+
+# Addendum 2026-07-29 — Web Phase 2 shipped (digest live, thread shutoff done)
+
+Shipped in digilab-web on `develop` (not yet merged to `main` / deployed). This is the
+trigger row in §A5's table: **Bot PR 1 (cleanup) is now unblocked**, and it can lag safely.
+
+## What landed on their side
+
+- **Daily digest** at `GET /api/internal/requests/digest`, Vercel cron `0 15 * * *`,
+  `CRON_SECRET` auth. Posts to the dedicated `#admin-digest` text channel via
+  `DISCORD_WEBHOOK_ADMIN_DIGEST`, per §A2. Skips entirely when nothing is pending.
+- **Grouped by game** (`admin_requests.game_id`), per §A2. Data errors and store requests are
+  itemized with admin deep links; bug and feature counts ride along un-pinged. Zero counts are
+  dropped, so the §2 sample's "0 features open" never actually renders — the code is right,
+  the sample was illustrative.
+- **Ping policy exactly as locked in Decision 2**: fresh items name their admins via `<@id>`
+  but are excluded from `allowed_mentions`; items past 72h are included, deduped across items,
+  re-pinged daily. `allowed_mentions.parse` is always `[]`.
+- **Thread shutoff**: `postDataError` and `postStoreRequest` are deleted, along with their
+  continent-tag helpers. `#scene-requests` and `#bug-reports` thread exactly as before.
+
+## Bot PR 1 is unblocked
+
+Delete the dead templates — `messages.py:9-28` (store_request + data_error under
+scene_coordination) and `messages.py:55-64` (data_error under bug_reports) — and fix the stale
+comment at `cogs/thread_watcher.py:64-67`. Nothing errors in the meantime: those types simply
+stop arriving.
+
+**Do not delete `#scene-coordination` yet.** Verified at ship time: **8 pending rows still
+carry a `discord_thread_id`**, so the legacy resolution path is live traffic, not a
+hypothetical. Their `resolveDiscordThread` / `getResolutionTarget` and the
+`store_request` / `data_error` branches of `resolutionChannelFor` are all retained for exactly
+those rows, and their code says so in a comment so nobody "cleans it up".
+
+**Nobody is measuring the drain, on either side.** PR 3 gates channel deletion on it and their
+code gates the dead branches on it, and there is no query, script, or surface reporting the
+number anywhere. `SELECT count(*) FROM admin_requests WHERE status='pending' AND
+discord_thread_id IS NOT NULL` is the whole check. They have it filed as a follow-up (surface
+it in the digest summary); until one side does it, treat "is the drain done?" as unanswered
+rather than assumed.
+
+## Cascade parity: verified, with one deliberate deviation
+
+Their port is `getSceneAdminCandidates` + `selectTierAdmins` in
+`src/lib/admin-digest-queries.ts` / `admin-digest.ts`, taken from `db.py:86-197` and **not**
+from `sceneHasAreaAdmin` (impact §4 point 7). Before shipping they ran the batched query
+side by side with our per-scene query against the shared production DB, for every pending item
+and each distinct scene, exercising the direct, child-metro and global-fallthrough branches:
+**zero mismatches**. All seven parity points are ratcheted in their test suite, and the
+ratchets were mutation-tested (deliberate regressions introduced one at a time, each confirmed
+to fail).
+
+**The deviation, and why it does not break the §4 point 6 contract.** The digest cascade
+**is** game-scoped — it filters `admin_user_scenes`, `admin_regions` and `game_admin_roles` by
+the request's `game_id`. The agreed contract (both sides stay unfiltered until web Phase 5 /
+our PR 4) is nonetheless intact, because it applies to `sceneHasAreaAdmin`, which is the
+function with a counterpart on our side and which they left untouched. The digest cascade has
+no counterpart here: every one of our consumers is thread-driven, and digest items have no
+thread, so nothing we run reads that mention set. Every row in those tables is `'digimon'`
+today, so it is inert either way. **Tier 3 stays unfiltered on both sides**, matching
+`db.py:160-172`.
+
+**For PR 4:** their game-scoped cascade is now the reference implementation for the same
+change here, and `sceneHasAreaAdmin` still has to flip *with* us.
+
+**One divergence to expect at game #2, currently unhandled on both sides:** their `/admins`
+slash command answer and the digest's mention set will disagree for a non-Digimon scene until
+PR 4 lands, since ours is still hardcoded to `game_id = 'digimon'`.
+
+## Webhook identities (the §A4 "small, anytime" item) — done
+
+`discordSend` now takes `username` / `avatar_url`, and every web sender is stamped:
+"DigiLab Digest", "DigiLab Requests", "DigiLab" (activity), "DigiLab Admin" (resolution
+embeds), all with `https://digilab.cards/icons/icon-192.png`. No Discord-side changes needed.
+Our `log_to_discord` already did this; the asymmetry §A4 noted is closed.
+
+## Still owed on their side — NOTHING (correction 2026-07-29)
+
+The paragraph that stood here was stale: all eight tag IDs (`RESOLVED` / `ONBOARDED` /
+`FIXED` / `WONT_FIX` + the four strip tags) were added to their Vercel env (Production +
+Preview) and local `.env` on 2026-07-29, before this addendum was written. The resolve-tag
+path is fully armed. `DISCORD_WEBHOOK_ADMIN_DIGEST` is likewise set. Remaining gates are
+Michael's: a live digest test fire, then merge `develop` → `main` (which activates the
+thread shutoff and the cron).
