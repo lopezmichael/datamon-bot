@@ -307,6 +307,15 @@ silence = inbox zero" property erodes. The 2026-07-18 rejection of a dedicated c
 - `reactions.py`: resolve-permission check scoped by the request's game.
 - `role_sync`: max-role-across-games union per A3.1.
 - `/admins`, `/roster`, `/scene`: optional game parameter (default: all games for the scene).
+- **Decision required at PR 4 (found during the Phase 2 cascade port, 2026-07-29): is
+  "platform admin" inherently global, or can it be per-game?** The tier-3 global fallback
+  (`db.get_global_admin_discord_ids`) reads only `admin_users.role` and the `"user"`
+  is_super/is_platform flags — a user whose platform_admin role exists *only* as a
+  `game_admin_roles` row for one game is NOT in the global fallback, on either side (the web
+  digest ported this faithfully). Inert while everything is digimon; at Gundam launch decide:
+  either platform admins are always global (enforce via user flags, never per-game rows), or
+  the fallback becomes per-game (global fallback for a Gundam request = Gundam platform
+  admins + flagged users). Whichever way, bot and web must change together.
 
 **Web-side items recorded here for coordination:**
 - `admin_user_scenes` / `admin_regions` `game_id` migration (A1) — before Phase 2 digest.
