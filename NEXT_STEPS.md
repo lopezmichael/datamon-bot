@@ -1,16 +1,30 @@
 # Datamon Bot — Next Steps
 
-## Current Status (2026-04-30)
+## Current Status (2026-08-10)
 
 - All bot code implemented, bug-reviewed, and compiles cleanly
 - Bot connects to Discord as **Datamon#4349**, all 7 cogs load, command tree synced
 - **84/86** admin `discord_user_id` values linked in DB (2 not in server: aomceodeadly, gamescornerdigimon)
 - Role sync verified: all Discord roles match DB state
-- Slash commands (`/admins`, `/roster`, `/requests`, `/mystats`, `/scene`, `/help`) confirmed working
 - DB migrations applied: `discord_thread_id` on `admin_requests`, `admin_regions` table created
 - Existing requests have NULL `discord_thread_id` — react-to-resolve only works on new requests
-- All four forum channels have consistent tag behavior (resolve tags, status stripping, auto-archive)
+- All **three** tracked forum channels have consistent tag behavior (resolve tags, status
+  stripping, auto-archive). `#scene-coordination` was retired in PR 3, so a healthy boot logs
+  `Forum config OK — 3 channels` — the earlier note expecting 4 predated that change
 - `resolved_by` now stores Discord user ID (not display name) — old records unaffected
+
+### Connection resilience + alerting pass (2026-08-10)
+
+Deployed and confirmed booting clean (all 7 cogs, pool on first attempt, forum config OK).
+
+- Neon was dropping idle connections; the pool served the dead connection and the 5-minute loops
+  alerted repeatedly. Query helpers now retry, and `command_timeout` bounds a blackholed socket
+- `/requests` and `/mystats` had been raising `UndefinedColumnError` against the live database —
+  the column is `submitted_at`, not `created_at`. Both were broken for admins for some time,
+  unrelated to the connection issue. Fixed and verified against production data
+- Loop failure alerting moved to a shared `utils.LoopFailureAlerter` (consecutive-failure
+  threshold, error text in the alert, recovery announced)
+- `/requests` and `/mystats` now `defer()` before querying — **needs live confirmation, see below**
 
 ---
 
@@ -54,12 +68,20 @@ Start the bot locally: `source .venv/bin/activate && python bot.py`
 4. Test "Won't Fix" / "Not Planned" / "On Hold" tags — these should auto-archive after 1 week
 5. To test quickly: temporarily lower thresholds in `cogs/archiver.py`
 
-### 5. Slash Commands (already confirmed working, but double-check)
+### 5. Slash Commands
 
+**`/requests` and `/mystats` are the priority here (2026-08-10).** They were failing outright
+against the live database until today, *and* they are the two commands whose response mechanism
+changed (they now `defer()` and reply via `followup`). Nothing about that path can be tested
+without a live Discord server, so it is unverified until someone runs it.
+
+- `/requests` — admin-only. Should render, not error. Expected shape as of 2026-08-10:
+  34 store / 25 scene / 5 data-error / 3 bug-report open. Confirm the reply is **ephemeral**
+  and that there is no lingering "thinking…" state
+- `/mystats` — admin-only, shows your resolved count, avg resolution time, scenes managed.
+  Same ephemeral / no-stuck-thinking check
 - `/admins dfw` — should show admins with role emojis and mentions
 - `/roster dfw` — admin-only, shows stores + tournament counts
-- `/requests` — admin-only, shows open request counts per type with oldest age and avg resolution time
-- `/mystats` — admin-only, shows your resolved count, avg resolution time, scenes managed
 - `/scene dfw` — shows stats + link to app
 - `/help` — shows command list (ephemeral) — should list all 6 commands
 - Test autocomplete by typing partial scene names
@@ -86,6 +108,18 @@ Start the bot locally: `source .venv/bin/activate && python bot.py`
 4. If all scenes are healthy, no thread is created
 5. To test: temporarily change the weekday check in `cogs/digest.py`
 
+### 9. Loop Failure Alerting (new 2026-08-10)
+
+Hard to trigger deliberately; mostly confirmed by absence. What to look for in `#bot-log`:
+
+1. A failing loop should produce **one** message naming the exception
+   (e.g. `⚠️ **Role sync loop** failed 2 consecutive runs — ConnectionDoesNotExistError: …`),
+   not a bare "check `railway logs`"
+2. When it heals, a single `✅ … recovered after N failed runs`
+3. A loop that fails once and succeeds on the next tick should produce **nothing** — that
+   suppression is the whole point, and it is also the trade-off: a slow flap on a 5-minute loop
+   is now invisible in Discord. `railway logs` still has every occurrence
+
 ---
 
 ## Deployment
@@ -97,6 +131,35 @@ VPS/systemd instructions are obsolete and the systemd unit has been removed.
 ---
 
 ## Remaining Items
+
+### Decide: `defer()` on the three public slash commands (2026-08-10)
+
+`/requests` and `/mystats` defer before querying. `/admins`, `/roster` and `/scene` do not,
+because they are the awkward case: their **success** reply is a public embed but their **error**
+replies ("Scene `x` not found", "You need admin access for this scene") are ephemeral, and
+`defer()` fixes visibility for the whole interaction. Covering them means picking one:
+
+- **Defer public** — errors become visible in-channel
+- **Defer ephemeral** — the scene/roster/admin embeds stop being publicly visible
+
+Until one is chosen, those three can still hit Discord's 3-second deadline on a slow query and
+show "the application did not respond".
+
+### Confirm Neon's autosuspend / idle setting (2026-08-10)
+
+The retry handles idle-connection drops regardless of cause, but the underlying cutoff was never
+established. Neon's compute autosuspend defaults to 5 minutes, which would sit exactly on the
+5-minute loop interval and would explain both the intermittency and the flapping. Visible in the
+Neon console (Branch → Compute → scale-to-zero / `suspend_timeout_seconds`). Worth knowing before
+changing any loop interval. Measured separately: connections to the `-pooler` endpoint survived
+420s idle, so PgBouncer is absorbing most of it.
+
+### Dead env var: `DISCORD_CHANNEL_SCENE_COORDINATION`
+
+`config.py` stopped requiring it when PR 3 retired the channel, and `.env.example` is already
+clean, but the variable is still set in local `.env` and probably in Railway's Variables tab.
+Harmless — nothing reads it — but it should be deleted from Railway so the next person doesn't
+think the channel is still live.
 
 ### Not yet populated: `admin_regions`
 

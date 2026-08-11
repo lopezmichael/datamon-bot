@@ -21,8 +21,8 @@ Requires Python 3.12+. All env vars are required — the bot fails fast on missi
 ```
 bot.py              # Entry point, DatamonBot subclass, lifecycle
 config.py           # Env vars, ROLE_MAP, FORUM_CHANNELS
-db.py               # asyncpg pool, all query helpers
-utils.py            # Shared utilities (webhook logging)
+db.py               # asyncpg pool, all query helpers, dead-connection retry
+utils.py            # Webhook logging, LoopFailureAlerter, thread tag helpers
 messages.py         # Message templates for forum thread responses
 cogs/
   role_sync.py      # 5-min loop: DB roles -> Discord roles
@@ -39,9 +39,12 @@ cogs/
 - **Python 3.12+**, async throughout (discord.py + asyncpg)
 - All config via environment variables loaded in `config.py` — never hardcode IDs or secrets
 - Database queries live in `db.py` — cogs call helpers, not raw SQL
+- **Never call `pool.fetch` / `fetchrow` / `execute` directly**, in `db.py` or anywhere else. Go through `_fetch` / `_fetchrow` / `_run`, which retry when Neon has dropped the pooled connection out from under us. Anything routed through `_run` must be safe to run more than once
 - Bot is **read-only** on the database except for `UPDATE admin_requests SET status='resolved'` — enforced at the DB level since 2026-07-29: the `datamon_bot` Postgres role has SELECT everywhere and column-level UPDATE on `admin_requests(status, resolved_at, resolved_by)` only
+- Periodic loops report failures via `utils.LoopFailureAlerter`, not a hand-rolled flag. Construct it with a threshold matched to the loop's cadence: >1 for the 5-minute loops so a single blip stays quiet, 1 for hourly-and-slower where the next data point is far away
+- Slash commands that query the DB must `defer()` before the first query — Discord rejects a first response after 3 seconds, and a Neon cold start can exceed that. `defer()` fixes the reply's visibility for the whole interaction, so it is only straightforward where every path shares one ephemerality
 - Discord rate limits: role_sync adds 1-second delays between role changes
-- Logging goes to stdout via Python `logging` module; Railway captures stdout (short retention, ~1 week)
+- Logging goes to stdout via Python `logging` module; Railway captures stdout (short retention, ~1 week). Anything you'd need for a postmortem has to reach `#bot-log`, not just stdout
 
 ## Commands
 

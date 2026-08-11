@@ -28,7 +28,7 @@ The bot completes the loop: Discord → App sync, role management, slash command
 ┌─────────────┐    webhooks (HTTP POST)    ┌──────────────────┐
 │  digilab-app │ ───────────────────────── │  Discord Server  │
 │  (R Shiny)   │                            │                  │
-│              │    bot token REST API      │  #scene-coord    │
+│              │    bot token REST API      │  #feature-reqs   │
 │              │ ───────────────────────── │  #scene-requests │
 └──────┬───────┘                            │  #bug-reports    │
        │                                    └────────┬─────────┘
@@ -409,3 +409,50 @@ Phase 1–2 first for immediate utility. Phase 3–4 for automation. Phase 5–6
 - **Logging**: Python `logging` module → stdout → Railway log capture (~1-week retention)
 - **Health check**: Bot sets a custom status ("Watching N scenes") updated every 5 minutes alongside role sync
 - **Error tracking**: Log errors to a `#bot-log` channel in the OPS category (simple webhook, not Sentry)
+
+### Loop failure alerting *(revised 2026-08-10)*
+
+Each periodic loop owns a `utils.LoopFailureAlerter`. The original design was a per-cog boolean
+that alerted on the first failed run and reset on the first successful one, which had two faults
+that only showed up under a real fault:
+
+- **It reset on any success, so a flapping dependency re-alerted every cycle.** An intermittent
+  database connection produced fail → recover → fail, and each recovery re-armed the alert. One
+  cause, four warnings in an evening.
+- **The alert carried nothing.** "Check `railway logs`" is a pointer to a store with about a
+  week of retention, so an overnight flap can outlive the only record of why it happened.
+
+Now: alert after N *consecutive* failures, carry the exception text, and announce recovery.
+N is chosen per cadence — above 1 for the 5-minute loops, where one blip that heals on the next
+tick is noise; exactly 1 for hourly-and-slower loops, where waiting for a second data point
+means an hour or a week of silence.
+
+**Known trade-off:** a slow flap that never fails twice in a row on a fast loop now produces no
+Discord alert at all. `log.exception` still records every occurrence. If that gap ever matters,
+the fix is failures-per-rolling-window rather than a consecutive count.
+
+### Database connection handling *(added 2026-08-10)*
+
+Neon closes connections that have sat idle and the socket goes half-open, so asyncpg's pool sees
+`is_closed() == False`, hands the connection out, and only the query discovers the corpse
+(`ConnectionResetError` → `ConnectionDoesNotExistError`). asyncpg has no pool-level liveness
+check — `setup=` converts a query failure into an acquire failure, and a custom `connection_class`
+cannot help because recovery requires going back to the pool for a *different* connection. So the
+retry lives in `db.py`, wrapping each pool call.
+
+Two constraints worth preserving:
+
+- **The retry tuple is deliberately narrow.** `asyncpg.InterfaceError` is a different family —
+  "pool is closing", wrong argument count, "another operation is in progress" — all permanent for
+  the call in question. Retrying them delays the real error and files it in the logs under the
+  wrong cause.
+- **Do not lower `command_timeout` toward Discord's 3-second interaction budget.** It exists to
+  bound a blackholed connection, where no exception is ever raised and the retry cannot fire.
+  Measured worst case across all helpers is ~1.0s (`get_active_admins`), and the 5-minute loops
+  have no deadline at all — tightening it would kill them spuriously. Deferring is what protects
+  the interaction budget.
+
+`max_inactive_connection_lifetime` is deliberately left at asyncpg's default. Setting it below
+the loop interval looks like prevention but measures as a loss: the idle sweep does not honour
+`min_size`, so the pool drains to zero and every tick pays a fresh TCP+TLS+SCRAM handshake.
+Connections to the `-pooler` endpoint were measured alive at 420s idle, so it prevents nothing.

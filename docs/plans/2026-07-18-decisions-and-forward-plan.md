@@ -497,3 +497,68 @@ Preview) and local `.env` on 2026-07-29, before this addendum was written. The r
 path is fully armed. `DISCORD_WEBHOOK_ADMIN_DIGEST` is likewise set. Remaining gates are
 Michael's: a live digest test fire, then merge `develop` → `main` (which activates the
 thread shutoff and the cron).
+
+---
+
+# Addendum 2026-08-10 — Connection resilience, and a shared-schema bug worth checking on the web side
+
+Bot-side incident and fix, recorded here because two findings touch the shared database and one
+of them may reproduce in `digilab-web`.
+
+## The incident
+
+`#bot-log` took repeated "role sync loop failed" / "scene cache refresh loop failed" warnings
+overnight. Cause: Neon drops connections that have sat idle and the socket goes half-open, so
+asyncpg's pool reports `is_closed() == False`, hands the dead connection out, and only the next
+query finds it (`ConnectionResetError [Errno 104]` → `ConnectionDoesNotExistError`). Fixed by
+retrying at the query-helper layer in `db.py`; asyncpg has no pool-level liveness hook that
+would do it (`setup=` just moves the failure from query-time to acquire-time, and a custom
+`connection_class` cannot switch connections, which is what recovery requires).
+
+**Relevant to the web side:** if `digilab-web` holds long-lived Neon connections across idle
+periods, it has the same exposure. Serverless/per-request connections are not affected.
+
+## Shared-schema finding: there is no `admin_requests.created_at`
+
+`/requests` and `/mystats` had been raising `UndefinedColumnError` against production. Both
+queries referenced `created_at`; the column is **`submitted_at`**. Verified against the live
+schema — `admin_requests` is:
+
+```
+id, request_type, scene_id, status, payload, discord_username, submitted_at,
+resolved_at, resolved_by, notes, discord_thread_id, submitted_by_user_id, game_id
+```
+
+**Worth a grep on the web side.** Anything computing request age or time-to-resolution over
+`admin_requests` needs `submitted_at`. Ours was silently broken for an unknown stretch because
+nothing exercises those two slash commands automatically and the failure was invisible until
+someone ran the command. The daily digest's "items older than 72 hours" logic is the obvious
+place for the same mistake to live.
+
+Post-fix figures, for cross-checking against whatever the digest reports:
+34 store / 25 scene / 5 data-error / 3 bug-report open; 652 resolved overall.
+
+## Neon connection facts (measured, useful to both repos)
+
+- `NEON_HOST` here is the **`-pooler`** (PgBouncer) endpoint. Connections to it survived **420s
+  idle** in testing — PgBouncer transparently re-attaches the backend, with probe latency
+  creeping up as the compute wakes.
+- Consequently, client-side idle pruning is counterproductive: asyncpg's
+  `max_inactive_connection_lifetime` does **not** honour `min_size`, so setting it below the loop
+  interval drains the pool to zero and buys a full TCP+TLS+SCRAM handshake per tick while
+  preventing nothing. Left at the default here after measuring both ways.
+- Neon's actual compute autosuspend setting was never confirmed (console access needed). The
+  default is 5 minutes, which would sit exactly on our 5-minute loop interval.
+
+## Alerting changed shape
+
+Per-cog `_failure_alerted` booleans replaced with a shared `utils.LoopFailureAlerter`: alert
+after N consecutive failures, carry the exception text, announce recovery. The old flag reset on
+any successful tick, so a flapping dependency re-alerted every cycle — that is what turned one
+cause into four warnings in an evening. No cross-repo impact; noted so the two repos' operational
+conventions don't drift silently.
+
+## Nothing here changes PR 4 or the multi-game contract
+
+No cascade, tier, or `game_id` behaviour was touched. The §A4 / PR 4 items and the per-game
+platform-admin question are exactly where the 2026-07-29 addendum left them.

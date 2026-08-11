@@ -39,7 +39,9 @@ python bot.py
 - **Auto-Archive** (1 hr loop) — Archives resolved threads after 48 hours of inactivity. Archives "Won't Fix", "Not Planned", and "On Hold" threads after 1 week.
 - **Stale Nudges** (daily) — Reminds admins about unresolved threads in `#bug-reports` and `#scene-requests` with no activity for 3+ days.
 - **Scene Health Digest** (weekly, Mondays 09:00 UTC) — Posts to `#admin-digest` (via webhook) summarizing dormant scenes (no tournaments in 60+ days), scenes with no assigned admin, and recently deactivated stores. Mentions relevant admins per scene. Skips the post if everything is healthy.
-- **Startup Config Check** — On boot, verifies every forum channel ID resolves to a real forum and every configured tag ID exists in that forum. Mismatches are logged and posted to `#bot-log`; the bot keeps running. Without it a wrong tag ID fails silently forever (threads never archive, nudges never stop).
+- **Startup Config Check** — On boot, verifies every forum channel ID resolves to a real forum and every configured tag ID exists in that forum. Mismatches are logged and posted to `#bot-log`; the bot keeps running. Without it a wrong tag ID fails silently forever (threads never archive, nudges never stop). A healthy boot logs `Forum config OK — 3 channels, all tag IDs present`.
+- **Connection Resilience** — Neon drops connections that have sat idle, and the socket goes half-open: the pool believes the connection is fine and hands it out, so only the next query discovers it is dead. Every query helper retries on that, and `command_timeout` bounds the case where a connection is blackholed rather than reset (no error is ever raised there, so retrying alone cannot help).
+- **Loop Failure Alerts** — Each background loop reports to `#bot-log` through a shared alerter. It waits for N *consecutive* failures before speaking (2 for the 5-minute loops, 1 for hourly and slower), names the actual exception rather than saying "check the logs", and posts a ✅ when the loop recovers. The threshold is what stops a flapping dependency from re-alerting every cycle.
 
 ## Request Flow
 
@@ -61,7 +63,8 @@ it and the channel has been deleted from the server.
 ```
 bot.py              Entry point, Bot subclass, lifecycle
 config.py           Env var loading, constants, ROLE_MAP
-db.py               asyncpg pool + query helpers
+db.py               asyncpg pool + query helpers + dead-connection retry
+utils.py            Webhook logging, LoopFailureAlerter, thread tag helpers
 messages.py         Message templates for forum threads
 cogs/
   role_sync.py      Periodic role sync task
