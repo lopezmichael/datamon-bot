@@ -9,7 +9,7 @@ from discord.ext import commands, tasks
 
 import config
 import db
-from utils import TRANSIENT_LOOP_EXCEPTIONS, apply_resolve_tag, log_to_discord
+from utils import TRANSIENT_LOOP_EXCEPTIONS, LoopFailureAlerter, apply_resolve_tag, log_to_discord
 
 log = logging.getLogger(__name__)
 
@@ -34,7 +34,9 @@ REJECTED_STATUSES = {"rejected", "dismissed"}
 class Archiver(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._failure_alerted = False
+        # Hourly loop — a second data point is an hour away, so alert on the
+        # first failure rather than sitting on it.
+        self._alerter = LoopFailureAlerter("Archive loop")
 
     async def cog_load(self) -> None:
         self.archive_stale.start()
@@ -50,16 +52,11 @@ class Archiver(commands.Cog):
         except TRANSIENT_LOOP_EXCEPTIONS:
             # Let discord.ext.tasks retry these with its own backoff
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("Archive run failed")
-            if not self._failure_alerted:
-                self._failure_alerted = True
-                await log_to_discord(
-                    "⚠️ Archive loop failed — check `railway logs`. "
-                    "Alerting once until it recovers."
-                )
+            await self._alerter.failed(exc)
             return
-        self._failure_alerted = False
+        await self._alerter.recovered()
 
     async def _run_archive(self) -> None:
         guild = self.bot.get_guild(config.GUILD_ID)

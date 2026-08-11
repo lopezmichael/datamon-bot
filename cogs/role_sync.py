@@ -8,7 +8,7 @@ from discord.ext import commands, tasks
 
 import config
 import db
-from utils import TRANSIENT_LOOP_EXCEPTIONS, log_to_discord
+from utils import TRANSIENT_LOOP_EXCEPTIONS, LoopFailureAlerter, log_to_discord
 
 log = logging.getLogger(__name__)
 
@@ -16,7 +16,9 @@ log = logging.getLogger(__name__)
 class RoleSync(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._failure_alerted = False
+        # 5-minute loop: require two consecutive failures so a single blip that
+        # heals on the next tick never reaches #bot-log.
+        self._alerter = LoopFailureAlerter("Role sync loop", threshold=2)
 
     async def cog_load(self) -> None:
         self.sync_roles.start()
@@ -32,16 +34,11 @@ class RoleSync(commands.Cog):
         except TRANSIENT_LOOP_EXCEPTIONS:
             # Let discord.ext.tasks retry these with its own backoff
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("Role sync run failed")
-            if not self._failure_alerted:
-                self._failure_alerted = True
-                await log_to_discord(
-                    "⚠️ Role sync loop failed — check `railway logs`. "
-                    "Alerting once until it recovers."
-                )
+            await self._alerter.failed(exc)
             return
-        self._failure_alerted = False
+        await self._alerter.recovered()
 
     async def _run_sync(self) -> None:
         guild = self.bot.get_guild(config.GUILD_ID)

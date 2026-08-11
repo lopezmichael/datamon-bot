@@ -8,7 +8,7 @@ from discord.ext import commands, tasks
 
 import config
 import db
-from utils import TRANSIENT_LOOP_EXCEPTIONS, log_to_discord
+from utils import TRANSIENT_LOOP_EXCEPTIONS, LoopFailureAlerter
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +24,9 @@ class Commands(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.scene_cache: list[tuple[str, str]] = []  # (slug, display_name)
-        self._failure_alerted = False
+        # 5-minute loop, and the cache stays usable while stale — two
+        # consecutive failures before alerting.
+        self._alerter = LoopFailureAlerter("Scene cache refresh loop", threshold=2)
 
     async def cog_load(self) -> None:
         await self._refresh_cache()
@@ -46,16 +48,11 @@ class Commands(commands.Cog):
         except TRANSIENT_LOOP_EXCEPTIONS:
             # Let discord.ext.tasks retry these with its own backoff
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("Scene cache refresh failed")
-            if not self._failure_alerted:
-                self._failure_alerted = True
-                await log_to_discord(
-                    "⚠️ Scene cache refresh loop failed — check `railway logs`. "
-                    "Alerting once until it recovers."
-                )
+            await self._alerter.failed(exc)
             return
-        self._failure_alerted = False
+        await self._alerter.recovered()
 
     @refresh_scene_cache.before_loop
     async def before_refresh(self) -> None:
@@ -199,9 +196,17 @@ class Commands(commands.Cog):
             )
             return
 
+        # Every response below is ephemeral and everything past here hits the DB,
+        # so defer before the first query: a Neon cold start or a retried dead
+        # connection can outrun Discord's 3-second interaction deadline, and past
+        # it the reply is rejected outright with "the application did not
+        # respond". Deferring buys 15 minutes. The permission check above runs
+        # off cached Discord roles, so it still answers instantly.
+        await interaction.response.defer(ephemeral=True)
+
         rows = await db.get_request_summary(self.bot.pool)
         if not rows:
-            await interaction.response.send_message("No requests found.", ephemeral=True)
+            await interaction.followup.send("No requests found.", ephemeral=True)
             return
 
         total_open = 0
@@ -226,7 +231,7 @@ class Commands(commands.Cog):
             description="\n".join(lines),
             color=0xFEE75C,
         )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # --- /mystats ---
     @app_commands.command(name="mystats", description="View your admin stats (admin only)")
@@ -238,6 +243,10 @@ class Commands(commands.Cog):
                 "You need admin access to view your stats.", ephemeral=True
             )
             return
+
+        # Ephemeral throughout, and three queries follow — defer before the
+        # first. See requests_cmd for why.
+        await interaction.response.defer(ephemeral=True)
 
         stats = await db.get_admin_stats(self.bot.pool, str(interaction.user.id))
 
@@ -281,7 +290,7 @@ class Commands(commands.Cog):
         else:
             embed.description = "No resolved requests yet — react \u2705 on a thread to get started!"
 
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
     # --- /help ---
     @app_commands.command(name="help", description="Show bot commands and info")

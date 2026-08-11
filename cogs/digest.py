@@ -9,7 +9,7 @@ from discord.ext import commands, tasks
 
 import config
 import db
-from utils import TRANSIENT_LOOP_EXCEPTIONS, log_to_discord, post_webhook
+from utils import TRANSIENT_LOOP_EXCEPTIONS, LoopFailureAlerter, post_webhook
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,9 @@ DIGEST_TIME = datetime.time(hour=9, tzinfo=datetime.timezone.utc)
 class Digest(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._failure_alerted = False
+        # Weekly loop — the next data point is seven days out. Alert on the
+        # first failure or the digest silently misses a week.
+        self._alerter = LoopFailureAlerter("Weekly digest loop")
 
     async def cog_load(self) -> None:
         self.weekly_digest.start()
@@ -38,16 +40,11 @@ class Digest(commands.Cog):
             # that can raise these runs before the webhook post (which swallows
             # its own errors), so a retry can never double-post.
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("Weekly digest run failed")
-            if not self._failure_alerted:
-                self._failure_alerted = True
-                await log_to_discord(
-                    "⚠️ Weekly digest loop failed — check `railway logs`. "
-                    "Alerting once until it recovers."
-                )
+            await self._alerter.failed(exc)
             return
-        self._failure_alerted = False
+        await self._alerter.recovered()
 
     async def _run_digest(self) -> None:
         # Only run on Mondays

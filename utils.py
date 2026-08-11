@@ -81,6 +81,63 @@ async def log_to_discord(message: str) -> None:
     await post_webhook(config.WEBHOOK_BOT_LOG, message)
 
 
+# How much of an exception's text to carry into an alert. Enough for a Postgres
+# error with its query fragment; short enough that five of them can't crowd a
+# channel.
+MAX_ALERT_ERROR_CHARS = 300
+
+
+class LoopFailureAlerter:
+    """Per-loop failure tracking for the periodic tasks, posting to #bot-log.
+
+    Every loop cog used to hand-roll this as a bare `_failure_alerted` bool, and
+    that shape has two faults the 2026-08-09 incident showed off. The flag reset
+    on *any* successful tick, so a flapping DB connection (fail, recover, fail)
+    re-alerted every single cycle — four warnings in one evening for one cause.
+    And the alert said only "check `railway logs`", which meant the alert itself
+    carried nothing actionable; Railway keeps ~a week of stdout, so an overnight
+    flap can outlive the only record of why it happened.
+
+    So: require `threshold` *consecutive* failures before saying anything, carry
+    the error text, and announce recovery so nobody has to guess whether it is
+    still broken. Fast loops want a threshold above 1 — one blip that heals on
+    the next tick is noise, not news. Loops that run hourly or slower should stay
+    at 1, since a second data point is an hour or a week away.
+    """
+
+    def __init__(self, label: str, threshold: int = 1) -> None:
+        self.label = label
+        self.threshold = threshold
+        self._consecutive = 0
+        self._alerted = False
+
+    async def failed(self, exc: BaseException) -> None:
+        """Record a failed run, alerting once the threshold is reached."""
+        self._consecutive += 1
+        if self._alerted or self._consecutive < self.threshold:
+            return
+
+        self._alerted = True
+        detail = f"{type(exc).__name__}: {exc}".strip()
+        if len(detail) > MAX_ALERT_ERROR_CHARS:
+            detail = detail[:MAX_ALERT_ERROR_CHARS - 1] + "…"
+        runs = "run" if self._consecutive == 1 else "consecutive runs"
+        await log_to_discord(
+            f"⚠️ **{self.label}** failed {self._consecutive} {runs} — `{detail}`\n"
+            "Silent until it recovers; `railway logs` has the traceback."
+        )
+
+    async def recovered(self) -> None:
+        """Record a successful run, announcing recovery only if we alerted."""
+        was_alerted, failures = self._alerted, self._consecutive
+        self._consecutive = 0
+        self._alerted = False
+        if was_alerted:
+            await log_to_discord(
+                f"✅ **{self.label}** recovered after {failures} failed runs."
+            )
+
+
 async def check_forum_config(guild: discord.Guild) -> None:
     """Verify every configured forum channel and tag ID actually exists. Non-fatal.
 

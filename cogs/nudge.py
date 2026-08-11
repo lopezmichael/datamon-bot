@@ -9,7 +9,7 @@ from discord.ext import commands, tasks
 
 import config
 import db
-from utils import TRANSIENT_LOOP_EXCEPTIONS, log_to_discord
+from utils import TRANSIENT_LOOP_EXCEPTIONS, LoopFailureAlerter, log_to_discord
 
 log = logging.getLogger(__name__)
 
@@ -48,7 +48,9 @@ DONE_TAGS: set[int] = {
 class Nudge(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-        self._failure_alerted = False
+        # Daily loop — waiting for a second failure would mean 24 hours of
+        # silence, so alert on the first.
+        self._alerter = LoopFailureAlerter("Stale nudge loop")
 
     async def cog_load(self) -> None:
         self.nudge_stale.start()
@@ -64,16 +66,11 @@ class Nudge(commands.Cog):
         except TRANSIENT_LOOP_EXCEPTIONS:
             # Let discord.ext.tasks retry these with its own backoff
             raise
-        except Exception:
+        except Exception as exc:
             log.exception("Stale nudge run failed")
-            if not self._failure_alerted:
-                self._failure_alerted = True
-                await log_to_discord(
-                    "⚠️ Stale nudge loop failed — check `railway logs`. "
-                    "Alerting once until it recovers."
-                )
+            await self._alerter.failed(exc)
             return
-        self._failure_alerted = False
+        await self._alerter.recovered()
 
     async def _run_nudge(self) -> None:
         guild = self.bot.get_guild(config.GUILD_ID)
