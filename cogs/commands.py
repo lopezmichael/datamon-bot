@@ -12,6 +12,50 @@ from utils import TRANSIENT_LOOP_EXCEPTIONS, LoopFailureAlerter
 
 log = logging.getLogger(__name__)
 
+# Discord's hard cap on an embed description. Over it the API answers 400 and the
+# interaction shows "the application did not respond", so a scene with a lot of
+# admins would break the command outright rather than show a long list.
+EMBED_DESCRIPTION_LIMIT = 4096
+
+# Room kept free for the "not shown" notice, sized for its longest rendering.
+_TRUNCATION_NOTICE = "\n\n*+{n} more not shown*"
+_TRUNCATION_RESERVE = len(_TRUNCATION_NOTICE.format(n=99999))
+
+
+def fit_embed_description(
+    blocks: list[str], limit: int = EMBED_DESCRIPTION_LIMIT
+) -> str:
+    """Join `blocks` into an embed description that fits, reporting what was cut.
+
+    Whole blocks are kept or dropped, so a game's section never renders half a
+    roster with no indication; the count in the notice is of dropped *entries*
+    (every line under a block's header). A first block that cannot fit on its own
+    is hard-truncated rather than dropped, since returning an empty description is
+    the same 400 this function exists to avoid.
+
+    Pure, so it is tested in tests/test_embed_fit.py.
+    """
+    kept: list[str] = []
+    used = 0
+    dropped = 0
+    for block in blocks:
+        separator = 2 if kept else 0  # the "\n\n" between blocks
+        if used + separator + len(block) + _TRUNCATION_RESERVE <= limit:
+            used += separator + len(block)
+            kept.append(block)
+        else:
+            dropped += block.count("\n")  # lines below the header
+
+    if not kept and blocks:
+        kept = [blocks[0][: max(limit - _TRUNCATION_RESERVE, 0)]]
+        dropped = sum(b.count("\n") for b in blocks) - kept[0].count("\n")
+
+    text = "\n\n".join(kept)
+    if dropped > 0:
+        text += _TRUNCATION_NOTICE.format(n=dropped)
+    return text
+
+
 ROLE_EMOJI = {
     "super_admin": "\U0001f534",      # 🔴
     "platform_admin": "\U0001f534",   # 🔴 (same as super_admin)
@@ -41,6 +85,10 @@ class Commands(commands.Cog):
         self.scene_cache = [(r["slug"], r["display_name"]) for r in scenes if r["slug"]]
         # Games ride the same loop: the list changes once a year at most, and a
         # slash command must not spend a round trip resolving a display name.
+        await self._refresh_games()
+
+    async def _refresh_games(self) -> None:
+        """Reload the game cache. Also called on demand when it is still cold."""
         games = await db.get_active_games(self.bot.pool)
         self.game_cache = {r["game_id"]: r["short_name"] or r["game_id"] for r in games}
 
@@ -107,23 +155,33 @@ class Commands(commands.Cog):
             await interaction.response.send_message(f"Scene `{scene}` not found.", ephemeral=True)
             return
 
-        # Validate against the cached list so a typo gets a real answer instead of a
-        # confidently empty one. Skipped when the cache is cold, since an empty cache
-        # is our problem, not the caller's.
-        if game and self.game_cache and game not in self.game_cache:
+        # A cold cache must not become a silent yes: fetch the list once rather
+        # than skipping validation, or an arbitrary string binds, matches no
+        # assignment row, and renders a plausible-looking lone Global block.
+        if not self.game_cache:
+            await self._refresh_games()
+        if game and game not in self.game_cache:
             await interaction.response.send_message(
                 f"Unknown game `{game}`.", ephemeral=True
             )
             return
 
-        # One query either way: passing game=None asks the cascade for every game at
-        # once and tags each tier 1-2 row with the game its assignment belongs to.
+        # game=None asks the cascade for every game at once and tags each tier 1-2
+        # row with the game its assignment belongs to.
         admins = await db.get_admins_for_scene(self.bot.pool, scene_row["scene_id"], game)
-        if not admins:
-            await interaction.response.send_message(
-                f"No admins found for **{scene_row['display_name']}**.", ephemeral=True
-            )
-            return
+
+        # Which games get a block. The cascade only knows games that HAVE an
+        # assignment here, so the default answer also reads scene_games: a game the
+        # scene is active for with nobody assigned must render as "no admins yet",
+        # not vanish, or the reader cannot tell that apart from "not active here".
+        if game:
+            show_games = [game]
+        else:
+            show_games = [
+                r["game_id"] for r in await db.get_games_for_scene(
+                    self.bot.pool, scene_row["scene_id"]
+                )
+            ]
 
         # Tier 1-2 rows group under their game; tier 3 is the global fallback and is
         # not scene-keyed, so it gets its own trailing group.
@@ -140,20 +198,31 @@ class Commands(commands.Cog):
             else:
                 globals_.append(line)
 
+        # Active-for-this-scene games first, in their own order, then any game that
+        # has assignments without an active junction row (stale membership, worth
+        # seeing rather than hiding).
+        ordered = list(show_games) + [g for g in sorted(by_game) if g not in show_games]
         blocks = [
-            f"**{self._game_label(game_id)}**\n" + "\n".join(lines)
-            for game_id, lines in sorted(by_game.items())
+            f"**{self._game_label(gid)}**\n"
+            + ("\n".join(by_game[gid]) if by_game.get(gid) else "*No admins assigned yet*")
+            for gid in ordered
         ]
         if globals_:
             label = "Global" if not game else f"Global ({self._game_label(game)})"
             blocks.append(f"**{label}**\n" + "\n".join(globals_))
 
-        title = f"Admins — {scene_row['display_name']}"
+        if not blocks:
+            await interaction.response.send_message(
+                f"No admins found for **{scene_row['display_name']}**.", ephemeral=True
+            )
+            return
+
+        title = f"Admins \u2014 {scene_row['display_name']}"
         if game:
             title += f" ({self._game_label(game)})"
         embed = discord.Embed(
             title=title,
-            description="\n\n".join(blocks),
+            description=fit_embed_description(blocks),
             color=0x5865F2,
         )
         embed.set_footer(text=f"🔴 Platform  🟡 Regional  🟢 Scene")
