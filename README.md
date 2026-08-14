@@ -24,7 +24,7 @@ python bot.py
 
 | Command | Access | Description |
 |---------|--------|-------------|
-| `/admins [scene]` | Anyone | View admins for a scene |
+| `/admins [scene] [game]` | Anyone | View admins for a scene (default: grouped by game) |
 | `/roster [scene]` | Scene Admin+ | View stores & tournaments |
 | `/requests` | Scene Admin+ | Open request summary |
 | `/mystats` | Scene Admin+ | Personal resolution stats |

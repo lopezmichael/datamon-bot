@@ -50,7 +50,7 @@ cogs/
 
 | Command | Access | Description |
 |---------|--------|-------------|
-| `/admins [scene]` | Public | View admins for a scene |
+| `/admins [scene] [game]` | Public | View admins for a scene (default: grouped by game) |
 | `/roster [scene]` | Admin-only | Stores & tournament counts |
 | `/requests` | Admin-only | Open request summary (ephemeral) |
 | `/mystats` | Admin-only | Personal resolution stats (ephemeral) |

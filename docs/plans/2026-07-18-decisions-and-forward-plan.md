@@ -289,7 +289,81 @@ the Discord channel.*
   `.env.example` (bot fail-fasts on missing env vars — deletion requires this PR first).
 - Then delete the channel server-side.
 
-**PR 4 — game-aware bot (needed by the time a second game's requests flow, not before).**
+**PR 4 — game-aware bot. IMPLEMENTED 2026-08-13 on branch `pr4-game-aware`, committed
+locally, DELIBERATELY NOT PUSHED.**
+
+> ## ⛔ DEPLOY CONTRACT — WEB SHIPS FIRST
+>
+> **Do not push `pr4-game-aware` to `main` until digilab-web's admin game-scoping (their
+> Phase 5) is live in production.** Railway auto-deploys `main`, so a push *is* a deploy.
+>
+> The ordering is not symmetric, and bot-first is the dangerous direction. Once tiers 1-2 are
+> game-filtered here, a request on a scene with no admin *for that game* falls through to the
+> tier-3 fallback. Web-first, the two cascades agree throughout. Bot-first, this bot starts
+> mass-pinging on Gundam scenes nobody covers yet, while the web app still computes the old
+> unfiltered answer for the same request — the exact one-sided desync §A4's "both sides flip
+> together" rule exists to prevent.
+>
+> The mirror obligation is mutual and specific: the tier-3 policy below now differs from
+> digilab-web `src/lib/admin-digest-queries.ts` (whose tier 3 is still the flat unfiltered
+> read, with a comment saying it is faithful to this bot). Their Phase 5 has to adopt the same
+> policy, and `sceneHasAreaAdmin` in `src/lib/discord.ts` still has to flip with us.
+
+**What shipped (verify line numbers against the file, not against this doc — the pre-2026-08-13
+references in this section were ~80-100 lines stale, which is why they are now named by
+function).**
+
+- `db.get_request_by_thread` — selects `game_id` (COALESCEd to 'digimon'). This is the master
+  unlock: thread_watcher, nudge, reactions and the archiver all reach the request through it,
+  so the game travels *with the request* instead of being guessed.
+- `db.get_admins_for_scene(pool, scene_id, game_id)` — `game_id` required, never defaulted.
+  Tiers 1-2 filter `admin_user_scenes.game_id` / `admin_regions.game_id` and resolve the role
+  from that game's `game_admin_roles` row; rows are tagged with the game the assignment
+  belongs to. `game_id=None` means "every game", used only by `/admins` with no game argument.
+- **Tier 3 policy, locked by Michael 2026-08-13** (this is the answer to the "decision
+  required at PR 4" item that used to stand here): **super admins answer for every game,
+  always; platform admins answer for the games they hold a `game_admin_roles` row for.**
+  Implemented once, in `db._global_admin_predicate`, shared by `get_admins_for_scene` and
+  `get_global_admin_discord_ids` so the two cannot drift. It carries a **grandfather arm** —
+  an admin flagged platform/super the legacy way who holds *no* `game_admin_roles` row at all
+  stays in the fallback — because dropping them would silently shrink today's Digimon
+  fallback. Delete that arm once every platform admin holds an explicit per-game row.
+- `db.get_global_admin_discord_ids(pool, game_id=None)` — same predicate. Scene-*less*
+  requests pass their own game; only a manual forum thread (no request row at all) passes None.
+- `db.get_admin_scene_rows_for_user(pool, discord_user_id, game_id)` + the
+  `get_admin_scenes_for_user` id-only wrapper — `game_id` required. `reactions.py` passes the
+  **request's** game (react-to-resolve authorization); `/roster` passes None on purpose, since
+  a roster is stores and lifetime tournament counts on shared geography, and scoping it would
+  deny an admin the roster of a scene they demonstrably administer; `/mystats` uses the rows
+  form for a per-game breakdown.
+- `db.get_active_admins` (role_sync) — `game_admin_roles` is now read as the **strongest role
+  across every game** instead of digimon's, per A3.1. Discord roles are one flat namespace,
+  so the sync has to answer "what is this person, at most?".
+- **Digest** (`cogs/digest.py`) — per-game sections. The game list is
+  `db.get_games_with_scene_coverage`: active games in `games` that have at least one active
+  `scene_games` row for an active metro/online scene, ordered by scene count descending, so
+  Digimon leads today without the bot knowing Digimon is special. Each section runs that
+  game's dormant scenes, unassigned scenes, deactivated stores and its own cascade mentions.
+  An empty game list **raises** rather than posting nothing: a per-game digest with no games
+  renders as a silent healthy week, which is the failure shape that hid four broken card
+  syncs. Rendering is the pure `format_game_section`, covered by `tests/test_digest_format.py`
+  (no DB, no Discord; run it with `.venv/bin/python`).
+- `/admins` — optional `game` argument (autocompleted from a cached `games` read that rides
+  the existing 5-minute scene-cache loop). Default groups admins by game and puts the tier-3
+  fallback in its own trailing block. Still two queries, so the command's existing no-`defer`
+  shape is unchanged.
+
+**Why today's behavior is unchanged.** Every row in `admin_user_scenes`, `admin_regions` and
+`game_admin_roles` is `'digimon'`, and `admin_requests.game_id` is `NOT NULL DEFAULT
+'digimon'`. So every scoped predicate added here is satisfied by every existing row, and
+`game_admin_roles` being `UNIQUE(user_id, game_id)` means the "strongest role" subqueries
+select exactly the row the old `gar.game_id = 'digimon'` joins selected. The one intentional
+change in *output* is the digest's dormant-scene list, which now only counts tournaments of
+the section's game — a scene whose only recent event was Gundam no longer reads as healthy
+for Digimon.
+
+**Still owed after this PR:** `/scene` takes no game argument (its stats are still cross-game
+counts); `sceneHasAreaAdmin` on the web side; game tag env vars for #scene-requests.
 
 > **A1 dependency satisfied 2026-07-28** (digilab-web `cc450f7`, applied to the shared
 > production DB). `admin_user_scenes` and `admin_regions` both carry
@@ -304,22 +378,26 @@ the Discord channel.*
 > assignments), but every read is deliberately unfiltered, for the same reason we are: a
 > one-sided predicate desyncs the two cascades. So this bot is free to stay unfiltered until
 > PR 4, and PR 4 lands together with their Phase 5.
-- `db.py`: parameterize the five hardcoded `game_id = 'digimon'` joins (db.py:56, 113, 135,
-  151, 381) by the request row's `game_id`; cascade becomes
-  `get_admins_for_scene(scene_id, game_id)`; scope `admin_user_scenes` / `admin_regions`
-  joins by game once those tables carry it.
-- `reactions.py`: resolve-permission check scoped by the request's game.
-- `role_sync`: max-role-across-games union per A3.1.
-- `/admins`, `/roster`, `/scene`: optional game parameter (default: all games for the scene).
-- **Decision required at PR 4 (found during the Phase 2 cascade port, 2026-07-29): is
+*The original scope list, kept for the record. All of it shipped except the `/scene` game
+argument; its db.py line references (`db.py:56, 113, 135, 151, 381`) were already ~80-100
+lines stale by the time the PR was built, hence the by-function naming above.*
+- ✅ `db.py`: parameterize the five hardcoded `game_id = 'digimon'` joins by the request row's
+  `game_id`; cascade becomes `get_admins_for_scene(scene_id, game_id)`; scope
+  `admin_user_scenes` / `admin_regions` joins by game once those tables carry it.
+- ✅ `reactions.py`: resolve-permission check scoped by the request's game.
+- ✅ `role_sync`: max-role-across-games union per A3.1.
+- ✅ `/admins` optional game parameter (default: all games for the scene). `/roster` takes
+  None deliberately (see above); **`/scene` still has no game argument** — its store /
+  tournament / player counts remain cross-game.
+- ✅ **Decision required at PR 4 (found during the Phase 2 cascade port, 2026-07-29): is
   "platform admin" inherently global, or can it be per-game?** The tier-3 global fallback
-  (`db.get_global_admin_discord_ids`) reads only `admin_users.role` and the `"user"`
+  (`db.get_global_admin_discord_ids`) read only `admin_users.role` and the `"user"`
   is_super/is_platform flags — a user whose platform_admin role exists *only* as a
-  `game_admin_roles` row for one game is NOT in the global fallback, on either side (the web
-  digest ported this faithfully). Inert while everything is digimon; at Gundam launch decide:
-  either platform admins are always global (enforce via user flags, never per-game rows), or
-  the fallback becomes per-game (global fallback for a Gundam request = Gundam platform
-  admins + flagged users). Whichever way, bot and web must change together.
+  `game_admin_roles` row for one game was NOT in the global fallback, on either side (the web
+  digest ported this faithfully). **Answered 2026-08-13: the fallback is per-game.** Super
+  admins stay global; platform admins answer for the games they hold a `game_admin_roles` row
+  for, plus the grandfather arm for legacy-flagged admins with no per-game rows. Bot and web
+  must change together, and web goes first — see the deploy contract above.
 
 **Web-side items recorded here for coordination:**
 - `admin_user_scenes` / `admin_regions` `game_id` migration (A1) — before Phase 2 digest.
@@ -346,7 +424,7 @@ the Discord channel.*
 | Web Phase 2 | Digest to new `#admin-digest` (A2), game-grouped; server: create channel + webhook. Bot PR 1 (cleanup, can lag) |
 | Web Phase 4 | Bot PR 2 (feature template); server: feature webhook + tag ID |
 | After Phase 2 + legacy drain | Bot PR 3 (retire #scene-coordination) |
-| Before 2nd game's requests flow | Bot PR 4 (game-aware bot); server: game tags on #scene-requests |
+| Built 2026-08-13, **push gated on web Phase 5 being live in production** | Bot PR 4 (game-aware bot); server: game tags on #scene-requests |
 | Before 2nd game's results | Web: per-game filter on user-webhook subscriptions |
 | When Gundam community materializes | Server: onboarding roles + `#gundam` channel; dogfooded results webhook |
 
@@ -481,6 +559,12 @@ change here, and `sceneHasAreaAdmin` still has to flip *with* us.
 **One divergence to expect at game #2, currently unhandled on both sides:** their `/admins`
 slash command answer and the digest's mention set will disagree for a non-Digimon scene until
 PR 4 lands, since ours is still hardcoded to `game_id = 'digimon'`.
+
+> **Update 2026-08-13 (PR 4 built).** Tiers 1-2 here now match their scoped cascade. **Tier 3
+> no longer does**: ours is per-game (super always + `game_admin_roles` for the request's
+> game + a legacy grandfather arm), theirs is still the flat unfiltered read quoted above.
+> That is the one deliberate, temporary asymmetry, and it is why this PR must not reach
+> `main` before their Phase 5 adopts the same policy.
 
 ## Webhook identities (the §A4 "small, anytime" item) — done
 

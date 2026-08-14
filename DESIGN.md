@@ -195,9 +195,11 @@ For each Discord member with a DigiLab role:
 
 All commands are guild-only (no DM usage).
 
-#### `/admins [scene]`
+#### `/admins [scene] [game]`
 **Who can use:** Anyone
-**Description:** Show admins for a scene.
+**Description:** Show admins for a scene. `game` is optional; with no game the
+admins are grouped by the game each assignment belongs to, and the tier-3 global
+fallback gets its own block.
 
 ```
 /admins dallas-fort-worth
