@@ -562,17 +562,31 @@ async def get_dormant_scenes(
     Both halves are game-scoped: which scenes count (``scene_games``) and which
     tournaments count (``tournaments.game_id``). Without the second one a scene whose
     only recent event was another game's reads as healthy for every game.
+
+    Membership is orphan-tolerant, like ``get_recently_deactivated_stores``: a scene
+    with no ``scene_games`` rows at all is reported under every game rather than
+    dropped. A junction-less scene is precisely the kind of misconfiguration a health
+    digest exists to surface, and hiding it is the worse failure. (Zero such scenes
+    today.)
     """
     return await _fetch(pool,
         """
         SELECT s.scene_id, s.display_name,
                MAX(t.event_date) AS last_tournament
         FROM scenes s
-        JOIN scene_games sg ON sg.scene_id = s.scene_id
-                           AND sg.game_id = $2::text AND sg.is_active = TRUE
         LEFT JOIN stores st ON st.scene_id = s.scene_id
         LEFT JOIN tournaments t ON t.store_id = st.store_id AND t.game_id = $2::text
         WHERE s.scene_type IN ('metro', 'online') AND s.is_active = TRUE
+          AND (
+              EXISTS (
+                  SELECT 1 FROM scene_games sg
+                  WHERE sg.scene_id = s.scene_id AND sg.game_id = $2::text
+                    AND sg.is_active = TRUE
+              )
+              OR NOT EXISTS (
+                  SELECT 1 FROM scene_games sg2 WHERE sg2.scene_id = s.scene_id
+              )
+          )
         GROUP BY s.scene_id, s.display_name
         HAVING MAX(t.event_date) IS NULL OR MAX(t.event_date) < CURRENT_DATE - $1 * INTERVAL '1 day'
         ORDER BY MAX(t.event_date) NULLS FIRST
@@ -588,14 +602,26 @@ async def get_unassigned_scenes(pool: asyncpg.Pool, game_id: str) -> list[asyncp
     An admin assigned to a scene for Digimon does not cover it for Gundam, so the
     ``admin_user_scenes`` probe carries the game too. Every assignment row is
     'digimon' today, so a 'digimon' call returns exactly the pre-PR-4 list.
+
+    Membership is orphan-tolerant for the same reason as ``get_dormant_scenes``: a
+    scene with no ``scene_games`` rows is unassigned *and* unregistered, which is
+    more worth reporting, not less.
     """
     return await _fetch(pool,
         """
         SELECT s.scene_id, s.display_name
         FROM scenes s
-        JOIN scene_games sg ON sg.scene_id = s.scene_id
-                           AND sg.game_id = $1::text AND sg.is_active = TRUE
         WHERE s.scene_type IN ('metro', 'online') AND s.is_active = TRUE
+          AND (
+              EXISTS (
+                  SELECT 1 FROM scene_games sg
+                  WHERE sg.scene_id = s.scene_id AND sg.game_id = $1::text
+                    AND sg.is_active = TRUE
+              )
+              OR NOT EXISTS (
+                  SELECT 1 FROM scene_games sg2 WHERE sg2.scene_id = s.scene_id
+              )
+          )
           AND NOT EXISTS (
               SELECT 1 FROM admin_user_scenes aus
               JOIN admin_users au ON aus.user_id = au.user_id

@@ -87,6 +87,13 @@ class Digest(commands.Cog):
 
     @tasks.loop(time=DIGEST_TIME)
     async def weekly_digest(self) -> None:
+        # The loop ticks daily and only Monday is a real run, so the weekday gate
+        # lives HERE rather than inside _run_digest: with it further in, every
+        # non-Monday tick reached `recovered()` and posted "the digest recovered"
+        # the morning after a Monday failure, having done nothing at all.
+        if discord.utils.utcnow().weekday() != 0:
+            return
+
         # An exception escaping the loop body kills the loop permanently
         try:
             await self._run_digest()
@@ -102,10 +109,6 @@ class Digest(commands.Cog):
         await self._alerter.recovered()
 
     async def _run_digest(self) -> None:
-        # Only run on Mondays
-        if discord.utils.utcnow().weekday() != 0:
-            return
-
         games = await db.get_games_with_scene_coverage(self.bot.pool)
         if not games:
             # "Couldn't find out" must never render as "nothing to report". Every
@@ -118,21 +121,40 @@ class Digest(commands.Cog):
 
         # All DB work happens before the post, so a transient failure retried by the
         # loop can never double-post.
+        #
+        # Per game, not per run: one game's bad query (a dropped column, a permission
+        # gap on a table only it touches) used to cost the whole digest, including the
+        # games that were fine. A failed section becomes a visible line instead, so
+        # the week is still reported AND the breakage is legible to the admins reading
+        # it \u2014 not just to whoever greps #bot-log.
         sections: list[str] = []
+        failures: list[str] = []
         for game in games:
-            section = await self._game_section(game)
+            label = game["short_name"] or game["game_id"]
+            try:
+                section = await self._game_section(game)
+            except TRANSIENT_LOOP_EXCEPTIONS:
+                # Network-class: let the loop's own backoff retry the whole run.
+                raise
+            except Exception as exc:
+                log.exception("Digest section failed for game %s", game["game_id"])
+                failures.append(
+                    f"\u26a0\ufe0f **{label}** \u2014 section failed "
+                    f"(`{type(exc).__name__}`); check `railway logs`"
+                )
+                continue
             if section:
                 sections.append(section)
 
-        # Skip if every game is healthy
-        if not sections:
+        # Skip only if every game was healthy AND nothing broke
+        if not sections and not failures:
             log.info("Scene health digest: all clear, skipping post")
             return
 
         date_str = discord.utils.utcnow().strftime("%b %d, %Y")
         message = (
             f"\U0001f4ca **Weekly Scene Health Check \u2014 {date_str}**\n\n"
-            + "\n\n".join(sections)
+            + "\n\n".join(sections + failures)
         )
 
         await post_webhook(config.WEBHOOK_ADMIN_DIGEST, message)
