@@ -124,7 +124,15 @@ async def _fetchrow(pool: asyncpg.Pool, query: str, *args, **kwargs) -> asyncpg.
 async def get_active_admins(pool: asyncpg.Pool) -> list[asyncpg.Record]:
     """All active admins with their Discord user IDs and roles.
 
-    Resolves role from game_admin_roles (new) → user.is_super_admin → admin_users.role (legacy).
+    Resolves role from user.is_super_admin → user.is_platform_admin →
+    game_admin_roles → admin_users.role (legacy).
+
+    The game_admin_roles read is the **strongest role across every game**, not one
+    game's. Discord roles are a single flat namespace — there is no "Scene Admin
+    (Gundam)" role to grant — so the sync has to answer "what is this person, at
+    most?", per the PR 4 plan (A3.1). game_admin_roles is UNIQUE(user_id, game_id),
+    so while every row is digimon this picks exactly the row the old
+    `gar.game_id = 'digimon'` join picked.
     """
     return await _fetch(pool,
         """
@@ -132,12 +140,19 @@ async def get_active_admins(pool: asyncpg.Pool) -> list[asyncpg.Record]:
                COALESCE(
                    CASE WHEN u.is_super_admin = TRUE THEN 'super_admin' END,
                    CASE WHEN u.is_platform_admin = TRUE THEN 'platform_admin' END,
-                   gar.role,
+                   (SELECT g.role FROM game_admin_roles g
+                     WHERE g.user_id = u.id
+                     ORDER BY CASE g.role
+                                WHEN 'super_admin' THEN 1
+                                WHEN 'platform_admin' THEN 2
+                                WHEN 'regional_admin' THEN 3
+                                ELSE 4
+                              END
+                     LIMIT 1),
                    au.role
                ) AS role
         FROM admin_users au
         LEFT JOIN "user" u ON u.legacy_admin_id = au.user_id
-        LEFT JOIN game_admin_roles gar ON gar.user_id = u.id AND gar.game_id = 'digimon'
         WHERE au.is_active = TRUE
         """
     )
