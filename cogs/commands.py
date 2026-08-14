@@ -24,6 +24,7 @@ class Commands(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.scene_cache: list[tuple[str, str]] = []  # (slug, display_name)
+        self.game_cache: dict[str, str] = {}  # game_id -> short_name
         # 5-minute loop, and the cache stays usable while stale — two
         # consecutive failures before alerting.
         self._alerter = LoopFailureAlerter("Scene cache refresh loop", threshold=2)
@@ -38,6 +39,16 @@ class Commands(commands.Cog):
     async def _refresh_cache(self) -> None:
         scenes = await db.get_scenes(self.bot.pool)
         self.scene_cache = [(r["slug"], r["display_name"]) for r in scenes if r["slug"]]
+        # Games ride the same loop: the list changes once a year at most, and a
+        # slash command must not spend a round trip resolving a display name.
+        games = await db.get_active_games(self.bot.pool)
+        self.game_cache = {r["game_id"]: r["short_name"] or r["game_id"] for r in games}
+
+    def _game_label(self, game_id: str | None) -> str:
+        """Display name for a game id, falling back to the id itself."""
+        if not game_id:
+            return "All games"
+        return self.game_cache.get(game_id, game_id)
 
     @tasks.loop(minutes=5)
     async def refresh_scene_cache(self) -> None:
@@ -70,34 +81,79 @@ class Commands(commands.Cog):
         ]
         return matches[:25]
 
+    # Shared autocomplete for the game argument
+    async def game_autocomplete(
+        self, interaction: discord.Interaction, current: str
+    ) -> list[app_commands.Choice[str]]:
+        lower = current.lower()
+        return [
+            app_commands.Choice(name=name, value=game_id)
+            for game_id, name in sorted(self.game_cache.items())
+            if lower in game_id.lower() or lower in name.lower()
+        ][:25]
+
     # --- /admins ---
     @app_commands.command(name="admins", description="View admins for a scene")
-    @app_commands.describe(scene="Scene slug (start typing to search)")
-    @app_commands.autocomplete(scene=scene_autocomplete)
-    async def admins_cmd(self, interaction: discord.Interaction, scene: str) -> None:
+    @app_commands.describe(
+        scene="Scene slug (start typing to search)",
+        game="Game to scope to (default: every game this scene is active for)",
+    )
+    @app_commands.autocomplete(scene=scene_autocomplete, game=game_autocomplete)
+    async def admins_cmd(
+        self, interaction: discord.Interaction, scene: str, game: str | None = None
+    ) -> None:
         scene_row = await db.get_scene_by_slug(self.bot.pool, scene)
         if not scene_row:
             await interaction.response.send_message(f"Scene `{scene}` not found.", ephemeral=True)
             return
 
-        admins = await db.get_admins_for_scene(self.bot.pool, scene_row["scene_id"])
+        # Validate against the cached list so a typo gets a real answer instead of a
+        # confidently empty one. Skipped when the cache is cold, since an empty cache
+        # is our problem, not the caller's.
+        if game and self.game_cache and game not in self.game_cache:
+            await interaction.response.send_message(
+                f"Unknown game `{game}`.", ephemeral=True
+            )
+            return
+
+        # One query either way: passing game=None asks the cascade for every game at
+        # once and tags each tier 1-2 row with the game its assignment belongs to.
+        admins = await db.get_admins_for_scene(self.bot.pool, scene_row["scene_id"], game)
         if not admins:
             await interaction.response.send_message(
                 f"No admins found for **{scene_row['display_name']}**.", ephemeral=True
             )
             return
 
-        lines = []
+        # Tier 1-2 rows group under their game; tier 3 is the global fallback and is
+        # not scene-keyed, so it gets its own trailing group.
+        by_game: dict[str, list[str]] = {}
+        globals_: list[str] = []
         for a in admins:
             emoji = ROLE_EMOJI.get(a["role"], "")
             mention = f"<@{a['discord_user_id']}>" if a["discord_user_id"] else a["username"]
             primary = " (primary)" if a["is_primary"] else ""
             assignment = f" *{a['assignment_type']}*" if a["assignment_type"] != "direct" else ""
-            lines.append(f"{emoji} {mention}{primary}{assignment}")
+            line = f"{emoji} {mention}{primary}{assignment}"
+            if a["game_id"]:
+                by_game.setdefault(a["game_id"], []).append(line)
+            else:
+                globals_.append(line)
 
+        blocks = [
+            f"**{self._game_label(game_id)}**\n" + "\n".join(lines)
+            for game_id, lines in sorted(by_game.items())
+        ]
+        if globals_:
+            label = "Global" if not game else f"Global ({self._game_label(game)})"
+            blocks.append(f"**{label}**\n" + "\n".join(globals_))
+
+        title = f"Admins — {scene_row['display_name']}"
+        if game:
+            title += f" ({self._game_label(game)})"
         embed = discord.Embed(
-            title=f"Admins — {scene_row['display_name']}",
-            description="\n".join(lines),
+            title=title,
+            description="\n\n".join(blocks),
             color=0x5865F2,
         )
         embed.set_footer(text=f"🔴 Platform  🟡 Regional  🟢 Scene")
@@ -116,8 +172,13 @@ class Commands(commands.Cog):
         # Permission check: Platform Admin role OR admin for this scene
         has_platform = any(r.id == config.ROLE_PLATFORM_ADMIN for r in interaction.user.roles)
         if not has_platform:
+            # game_id=None on purpose: /roster shows the scene's stores and lifetime
+            # tournament counts, which are properties of the shared geography rather
+            # than of one game. Scoping the permission check to a game would deny an
+            # admin the roster of a scene they demonstrably administer. Same set of
+            # scenes as before PR 4.
             user_scenes = await db.get_admin_scenes_for_user(
-                self.bot.pool, str(interaction.user.id)
+                self.bot.pool, str(interaction.user.id), None
             )
             # None = not an admin; empty list = global admin (super/platform)
             has_access = (
@@ -250,9 +311,11 @@ class Commands(commands.Cog):
 
         stats = await db.get_admin_stats(self.bot.pool, str(interaction.user.id))
 
-        # Scene count
-        user_scenes = await db.get_admin_scenes_for_user(
-            self.bot.pool, str(interaction.user.id)
+        # Scene count, across every game (rows carry the game each assignment
+        # belongs to, so a multi-game admin gets a breakdown instead of a total
+        # that quietly double-counts a scene they hold for two games).
+        scene_rows = await db.get_admin_scene_rows_for_user(
+            self.bot.pool, str(interaction.user.id), None
         )
 
         embed = discord.Embed(
@@ -260,8 +323,19 @@ class Commands(commands.Cog):
             color=0x5865F2,
         )
 
-        if user_scenes is not None:
-            scene_count = "All (global)" if len(user_scenes) == 0 else str(len(user_scenes))
+        if scene_rows is not None:
+            if len(scene_rows) == 0:
+                scene_count = "All (global)"
+            else:
+                distinct_scenes = {r["scene_id"] for r in scene_rows}
+                per_game: dict[str, int] = {}
+                for r in scene_rows:
+                    per_game[r["game_id"]] = per_game.get(r["game_id"], 0) + 1
+                scene_count = str(len(distinct_scenes))
+                if len(per_game) > 1:
+                    scene_count += "\n" + ", ".join(
+                        f"{self._game_label(gid)}: {n}" for gid, n in sorted(per_game.items())
+                    )
             embed.add_field(name="Scenes Managed", value=scene_count, inline=True)
 
         if stats and stats["resolved_count"]:
@@ -303,7 +377,7 @@ class Commands(commands.Cog):
         embed.add_field(
             name="Commands",
             value=(
-                "**/admins** `[scene]` — View admins for a scene\n"
+                "**/admins** `[scene]` `[game]` — View admins for a scene\n"
                 "**/roster** `[scene]` — View stores & tournaments (admin only)\n"
                 "**/requests** — Open request summary (admin only)\n"
                 "**/mystats** — Your admin stats (admin only)\n"

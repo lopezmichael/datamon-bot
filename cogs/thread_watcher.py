@@ -76,16 +76,24 @@ class ThreadWatcher(commands.Cog):
         # stays because the branch is data-driven, not channel-driven: any row that does
         # carry a scene_id still routes by scene. (store_request / data_error stopped
         # threading entirely — they flow through the admin UI and the daily #admin-digest.)
+        #
+        # Both branches are scoped to the request's own game (PR 4): the cascade only
+        # considers that game's scene/regional admins, and the scene-less branch only
+        # that game's global admins. A Gundam request must not page the Digimon team.
         if request["scene_id"]:
             admin_ids = [
                 a["discord_user_id"]
                 for a in db.select_tier_admins(
-                    await db.get_admins_for_scene(self.bot.pool, request["scene_id"])
+                    await db.get_admins_for_scene(
+                        self.bot.pool, request["scene_id"], request["game_id"]
+                    )
                 )
                 if a["discord_user_id"]
             ]
         else:
-            admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
+            admin_ids = await db.get_global_admin_discord_ids(
+                self.bot.pool, request["game_id"]
+            )
         if not admin_ids:
             return
 
@@ -159,7 +167,9 @@ class ThreadWatcher(commands.Cog):
             log.warning("Cannot send welcome to thread %s", thread.id)
             return
 
-        # Mention platform admins for manual scene requests and bug reports
+        # Mention platform admins for manual scene requests and bug reports. A manual
+        # thread has no request row, so there is no game to scope to — this is the one
+        # place that legitimately asks for the global admins of every game.
         if channel_type in ("scene_requests", "bug_reports"):
             admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
             if admin_ids:

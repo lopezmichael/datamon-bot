@@ -190,7 +190,9 @@ class Nudge(commands.Cog):
 
         if request and request["scene_id"]:
             admins = db.select_tier_admins(
-                await db.get_admins_for_scene(self.bot.pool, request["scene_id"])
+                await db.get_admins_for_scene(
+                    self.bot.pool, request["scene_id"], request["game_id"]
+                )
             )
             parts = []
             seen: set[str] = set()
@@ -202,8 +204,11 @@ class Nudge(commands.Cog):
             if parts:
                 return " ".join(parts)
 
-        # Fallback: ping global admins
-        admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
+        # Fallback: ping global admins — of the request's game when we have one, of
+        # every game for a manual thread with no request row.
+        admin_ids = await db.get_global_admin_discord_ids(
+            self.bot.pool, request["game_id"] if request else None
+        )
         if admin_ids:
             return " ".join(f"<@{uid}>" for uid in admin_ids)
 

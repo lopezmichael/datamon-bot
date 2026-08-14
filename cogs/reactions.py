@@ -79,8 +79,12 @@ class Reactions(commands.Cog):
 
         has_platform = any(r.id == config.ROLE_PLATFORM_ADMIN for r in member.roles)
         if not has_platform:
+            # Scoped to the REQUEST's game: an admin assigned to a scene for one game
+            # does not thereby get to resolve another game's reports on it. Every
+            # assignment row is 'digimon' today, so this changes nobody's access to
+            # today's requests, all of which are 'digimon' too.
             user_scenes = await db.get_admin_scenes_for_user(
-                self.bot.pool, str(payload.user_id)
+                self.bot.pool, str(payload.user_id), request["game_id"]
             )
             # None = not an admin at all; otherwise check scene-level access
             has_access = (
@@ -125,7 +129,8 @@ class Reactions(commands.Cog):
         # Log to #bot-log
         scene_info = f" in scene #{request['scene_id']}" if request["scene_id"] else ""
         await log_to_discord(
-            f"Request #{request['id']} **{label.lower()}** by {member.mention}{scene_info}"
+            f"Request #{request['id']} **{label.lower()}** by {member.mention}"
+            f"{scene_info} ({request['game_id']})"
         )
         log.info("Request #%d resolved by %s", request["id"], member)
 
