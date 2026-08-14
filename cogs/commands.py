@@ -169,23 +169,23 @@ class Commands(commands.Cog):
             await interaction.response.send_message(f"Scene `{scene}` not found.", ephemeral=True)
             return
 
-        # Permission check: Platform Admin role OR admin for this scene
+        # Permission check: Platform Admin role OR admin for this scene.
+        #
+        # The Discord role still counts HERE, unlike the resolve path in
+        # cogs/reactions.py: /roster only displays stores and lifetime tournament
+        # counts for shared geography, it writes nothing and it is not game-scoped,
+        # so the flat badge is an adequate gate for a read. Authorization that
+        # changes data asks the DB per game instead.
         has_platform = any(r.id == config.ROLE_PLATFORM_ADMIN for r in interaction.user.roles)
         if not has_platform:
-            # game_id=None on purpose: /roster shows the scene's stores and lifetime
-            # tournament counts, which are properties of the shared geography rather
-            # than of one game. Scoping the permission check to a game would deny an
-            # admin the roster of a scene they demonstrably administer. Same set of
-            # scenes as before PR 4.
-            user_scenes = await db.get_admin_scenes_for_user(
+            # game_id=None on purpose: a roster is a property of the shared geography
+            # rather than of one game, so scoping the check would deny an admin the
+            # roster of a scene they demonstrably administer. Same set of scenes as
+            # before PR 4.
+            access = await db.get_admin_access_for_user(
                 self.bot.pool, str(interaction.user.id), None
             )
-            # None = not an admin; empty list = global admin (super/platform)
-            has_access = (
-                user_scenes is not None
-                and (len(user_scenes) == 0 or scene_row["scene_id"] in user_scenes)
-            )
-            if not has_access:
+            if not access.covers(scene_row["scene_id"]):
                 await interaction.response.send_message(
                     "You need admin access for this scene.", ephemeral=True
                 )
@@ -314,7 +314,7 @@ class Commands(commands.Cog):
         # Scene count, across every game (rows carry the game each assignment
         # belongs to, so a multi-game admin gets a breakdown instead of a total
         # that quietly double-counts a scene they hold for two games).
-        scene_rows = await db.get_admin_scene_rows_for_user(
+        access = await db.get_admin_access_for_user(
             self.bot.pool, str(interaction.user.id), None
         )
 
@@ -323,19 +323,19 @@ class Commands(commands.Cog):
             color=0x5865F2,
         )
 
-        if scene_rows is not None:
-            if len(scene_rows) == 0:
-                scene_count = "All (global)"
-            else:
-                distinct_scenes = {r["scene_id"] for r in scene_rows}
-                per_game: dict[str, int] = {}
-                for r in scene_rows:
-                    per_game[r["game_id"]] = per_game.get(r["game_id"], 0) + 1
-                scene_count = str(len(distinct_scenes))
-                if len(per_game) > 1:
-                    scene_count += "\n" + ", ".join(
-                        f"{self._game_label(gid)}: {n}" for gid, n in sorted(per_game.items())
-                    )
+        # Read the level, not the row count: 'scoped' with no rows is an admin with
+        # no assignments anywhere, which is the opposite of "All (global)".
+        if access.level == db.ADMIN_ACCESS_GLOBAL:
+            embed.add_field(name="Scenes Managed", value="All (global)", inline=True)
+        elif access.level == db.ADMIN_ACCESS_SCOPED:
+            per_game: dict[str, int] = {}
+            for r in access.rows:
+                per_game[r["game_id"]] = per_game.get(r["game_id"], 0) + 1
+            scene_count = str(len(access.scene_ids))
+            if len(per_game) > 1:
+                scene_count += "\n" + ", ".join(
+                    f"{self._game_label(gid)}: {n}" for gid, n in sorted(per_game.items())
+                )
             embed.add_field(name="Scenes Managed", value=scene_count, inline=True)
 
         if stats and stats["resolved_count"]:

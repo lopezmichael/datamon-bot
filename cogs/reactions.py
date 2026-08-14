@@ -72,42 +72,36 @@ class Reactions(commands.Cog):
         if request["status"] == "resolved":
             return
 
-        # Permission check: reactor must be admin for the request's scene or Platform Admin
+        # Permission check: the reactor must hold admin access for the request's game.
         member = await self._get_member(guild, payload.user_id)
         if not member:
             return
 
-        has_platform = any(r.id == config.ROLE_PLATFORM_ADMIN for r in member.roles)
-        if not has_platform:
-            # Scoped to the REQUEST's game: an admin assigned to a scene for one game
-            # does not thereby get to resolve another game's reports on it. Every
-            # assignment row is 'digimon' today, so this changes nobody's access to
-            # today's requests, all of which are 'digimon' too.
-            user_scenes = await db.get_admin_scenes_for_user(
-                self.bot.pool, str(payload.user_id), request["game_id"]
-            )
-            # None = not an admin at all; otherwise check scene-level access
-            has_access = (
-                user_scenes is not None
-                and (
-                    len(user_scenes) == 0  # global admin (super/platform)
-                    or not request["scene_id"]  # request has no scene
-                    or request["scene_id"] in user_scenes
-                )
-            )
-            if not has_access:
-                # Remove reaction and DM user
-                try:
-                    msg = await channel.fetch_message(payload.message_id)
-                    await msg.remove_reaction(payload.emoji, member)
-                except discord.Forbidden:
-                    pass
+        # The DB is the authority here, and it is asked on EVERY reaction. The
+        # Discord "Platform Admin" role used to short-circuit this check, and must
+        # not: that role is one flat badge across all games (role_sync grants it from
+        # the strongest role a person holds in ANY game), so honoring it as a bypass
+        # would let a Digimon-only platform admin resolve Gundam requests — the very
+        # thing the per-game fallback exists to prevent. Treat the role as cosmetic
+        # for authorization; `game_admin_roles` decides.
+        access = await db.get_admin_access_for_user(
+            self.bot.pool, str(payload.user_id), request["game_id"]
+        )
+        # Branch on the LEVEL, never on len(rows): 'scoped' with no rows means no
+        # access at all, while 'global' carries no rows by design.
+        if not access.covers(request["scene_id"]):
+            # Remove reaction and DM user
+            try:
+                msg = await channel.fetch_message(payload.message_id)
+                await msg.remove_reaction(payload.emoji, member)
+            except discord.Forbidden:
+                pass
 
-                try:
-                    await member.send("You need admin access for this scene to resolve requests.")
-                except discord.Forbidden:
-                    pass
-                return
+            try:
+                await member.send("You need admin access for this scene to resolve requests.")
+            except discord.Forbidden:
+                pass
+            return
 
         # Resolve in DB
         resolved = await db.resolve_request(

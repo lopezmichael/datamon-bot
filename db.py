@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from typing import NamedTuple
 
 import asyncpg
 
@@ -117,6 +118,14 @@ async def _fetchrow(pool: asyncpg.Pool, query: str, *args, **kwargs) -> asyncpg.
     return await _run(pool.fetchrow, query, *args, **kwargs)
 
 
+# Admin access levels (see AdminAccess / get_admin_access_for_user). Named
+# constants rather than bare strings so a typo is an AttributeError, not a
+# silently-denied admin.
+ADMIN_ACCESS_NONE = "none"
+ADMIN_ACCESS_GLOBAL = "global"
+ADMIN_ACCESS_SCOPED = "scoped"
+
+
 # ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------
@@ -183,31 +192,33 @@ async def get_scene_by_slug(pool: asyncpg.Pool, slug: str) -> asyncpg.Record | N
 
 
 # ---------------------------------------------------------------------------
-# Tier 3 — the global fallback
+# "Is this admin global for this game?" — one predicate, three uses
 # ---------------------------------------------------------------------------
 #
 # POLICY, locked 2026-08-13 with PR 4 (game-aware bot): **super admins answer for
-# every game, always; platform admins answer only for the games they hold a
-# `game_admin_roles` row for.** Before this the fallback was a flat "every active
+# every game, always; a platform admin answers for a game only if they hold a
+# `game_admin_roles` row for it.** Before this it was a flat "every active
 # super/platform admin", which was harmless while every scene assignment was
 # digimon — but tiers 1-2 are game-filtered now, so a Gundam report on a scene
-# with no Gundam admin falls through to tier 3, and an unfiltered tier 3 would
-# mass-ping the whole Digimon platform team for it.
+# with no Gundam admin falls through to the fallback, and an unfiltered fallback
+# would mass-ping the whole Digimon platform team for it.
 #
-# THIS PREDICATE MUST STAY MIRRORED with digilab-web's
-# `src/lib/admin-digest-queries.ts` (getSceneAdminCandidates tier 3 +
-# getGlobalAdminDiscordIds). That file is the behavioral source of truth for the
-# cascade and, as of this writing, still carries the OLD unfiltered tier 3 with a
-# comment saying it is faithful to this bot. Web ships its Phase 5 first, then
-# this. A one-sided change here means one side pings people the other does not.
+# THIS IS A VERBATIM TRANSCRIPTION of digilab-web's Phase 5 predicate on branch
+# `feat/admin-game-scoping` (`src/lib/admin-digest-queries.ts`, tier 3 of
+# getSceneAdminCandidates + getGlobalAdminDiscordIds), which ships BEFORE this
+# bot. Two details of theirs that are easy to "improve" and must not be:
+#   * the legacy half is `admin_users.role` / `user.is_super_admin` /
+#     `user.is_platform_admin` — a role that exists ONLY as a game_admin_roles
+#     row does not make someone global on its own; and
+#   * the per-game half only asks whether a `game_admin_roles` row EXISTS for the
+#     game. **The row's `role` is deliberately not consulted.** Adding
+#     `AND g.role IN (...)` would desync the two sides.
 #
-# The grandfather arm is a migration crutch, not policy: an admin flagged
-# platform/super the legacy way (`admin_users.role`, `user.is_platform_admin`)
-# who holds NO game_admin_roles row at all predates per-game roles, so excluding
-# them would silently shrink today's Digimon fallback. Delete the arm once every
-# platform admin holds an explicit per-game row.
+# It is also the authority for *who may resolve a request* (see
+# `get_admin_access_for_user`), so mention rights and resolve rights cannot drift
+# apart. The same shape is web's `hasPlatformAccess(ctx) && isGameAdmin(ctx, g)`.
 def _global_admin_predicate(au: str, u: str, game: str) -> str:
-    """SQL fragment for "is this admin in the tier-3 global fallback for `game`?".
+    """SQL fragment for "is this admin global for `game`?".
 
     `au` / `u` are the query's aliases for admin_users / "user"; `game` is a
     placeholder like ``"$2"`` (NULL = "any game", used by the un-scoped callers).
@@ -217,17 +228,14 @@ def _global_admin_predicate(au: str, u: str, game: str) -> str:
                -- Super admins answer for every game, always.
                {au}.role = 'super_admin'
                OR {u}.is_super_admin = TRUE
-               -- Platform (or super) admins holding a role in THIS game.
-               OR EXISTS (
-                   SELECT 1 FROM game_admin_roles g
-                   WHERE g.user_id = {u}.id
-                     AND ({game}::text IS NULL OR g.game_id = {game}::text)
-                     AND g.role IN ('platform_admin', 'super_admin')
-               )
-               -- Grandfather: legacy platform flag, no per-game rows at all.
+               -- Platform tier, holding a role row in THIS game. The row's role
+               -- is not consulted: presence is the game gate, tier is the legacy
+               -- flag. (Verbatim from web Phase 5 — do not "tighten" this.)
                OR (({au}.role = 'platform_admin' OR {u}.is_platform_admin = TRUE)
-                   AND NOT EXISTS (
-                       SELECT 1 FROM game_admin_roles g2 WHERE g2.user_id = {u}.id
+                   AND EXISTS (
+                       SELECT 1 FROM game_admin_roles g
+                       WHERE g.user_id = {u}.id
+                         AND ({game}::text IS NULL OR g.game_id = {game}::text)
                    ))
            )"""
 
@@ -658,47 +666,75 @@ async def get_scene_count(pool: asyncpg.Pool) -> int:
     return row["cnt"]
 
 
-async def get_admin_scene_rows_for_user(
+class AdminAccess(NamedTuple):
+    """What a Discord user may do about requests in one game.
+
+    ``level`` is the whole answer and callers MUST branch on it:
+
+    - ``'none'``   — not an active admin (or, for a game-scoped ask, not one here).
+    - ``'global'`` — answers for every scene in this game. Super admins always;
+      platform-tier admins for the games they hold a ``game_admin_roles`` row for,
+      per ``_global_admin_predicate``.
+    - ``'scoped'`` — answers only for ``rows``, the scene assignments they hold in
+      this game (direct + regional).
+
+    **Never infer access from ``len(rows)``.** That was a real bug: the old helper
+    returned a bare empty list for BOTH "global admin" and "admin with no
+    assignments in this game", so a Digimon-only scene admin reacting on a Gundam
+    request read as global and could resolve every Gundam request in the server.
+    An empty ``rows`` under ``'scoped'`` means the opposite of global: nothing.
+    """
+
+    level: str
+    rows: tuple[asyncpg.Record, ...] = ()
+
+    @property
+    def scene_ids(self) -> set[int]:
+        return {r["scene_id"] for r in self.rows}
+
+    def covers(self, scene_id: int | None) -> bool:
+        """May this user act on something attached to ``scene_id``?
+
+        ``scene_id=None`` is a scene-less request (bug report, new-scene request).
+        Those have no scene to match, so the test becomes "do they administer
+        anything at all in this game" — which is what keeps a Digimon scene admin
+        out of a Gundam bug report while leaving today's Digimon behavior intact.
+        """
+        if self.level == ADMIN_ACCESS_GLOBAL:
+            return True
+        if self.level != ADMIN_ACCESS_SCOPED:
+            return False
+        if scene_id is None:
+            return bool(self.rows)
+        return scene_id in self.scene_ids
+
+
+async def get_admin_access_for_user(
     pool: asyncpg.Pool, discord_user_id: str, game_id: str | None
-) -> list[asyncpg.Record] | None:
-    """Scenes a user is admin for (direct + regional), each tagged with its game.
+) -> AdminAccess:
+    """Resolve a Discord user's admin access, for one game or across all of them.
 
     ``game_id`` is required, not defaulted, so every caller states what it is asking:
 
-    - a game id scopes both halves — the role resolution (that game's
-      ``game_admin_roles`` row) and the assignment reads
-      (``admin_user_scenes.game_id`` / ``admin_regions.game_id``). This is the
-      authorization question: "may this person resolve *this request*", so pass the
+    - a game id scopes everything — whether they are global here
+      (``_global_admin_predicate``, the same test that decides who gets @mentioned)
+      and which assignments count (``admin_user_scenes.game_id`` /
+      ``admin_regions.game_id``). This is the authorization question, so pass the
       request's own game.
-    - None asks "any game", the pre-PR-4 shape, for display and for game-neutral
-      surfaces like ``/roster`` (stores and tournaments belong to the scene, which is
-      shared geography). It never narrows anyone's access relative to today.
+    - None asks "any game", for display and for game-neutral surfaces like
+      ``/roster`` (stores and tournaments belong to the scene, which is shared
+      geography). It never narrows anyone's access relative to today.
 
-    Returns None if the user is not an active admin at all. Returns an empty list for
-    global admins (super/platform), meaning "all scenes" — callers must keep treating
-    empty as global access, not as "no assignments".
+    Two round trips at most, and only one for a global admin.
     """
     user = await _fetchrow(pool,
-        """
+        f"""
         SELECT au.user_id,
-               COALESCE(
-                   CASE WHEN u.is_super_admin = TRUE THEN 'super_admin' END,
-                   CASE WHEN u.is_platform_admin = TRUE THEN 'platform_admin' END,
-                   -- The strongest per-game role in scope. game_admin_roles is
-                   -- UNIQUE(user_id, game_id), so with a game argument this picks
-                   -- the same single row the old `gar.game_id = 'digimon'` join did.
-                   (SELECT g.role FROM game_admin_roles g
-                     WHERE g.user_id = u.id
-                       AND ($2::text IS NULL OR g.game_id = $2::text)
-                     ORDER BY CASE g.role
-                                WHEN 'super_admin' THEN 1
-                                WHEN 'platform_admin' THEN 2
-                                WHEN 'regional_admin' THEN 3
-                                ELSE 4
-                              END
-                     LIMIT 1),
-                   au.role
-               ) AS role
+               -- COALESCE because the predicate evaluates to NULL, not FALSE, for
+               -- an admin with no linked "user" row (NULL flags). SQL's WHERE drops
+               -- those rows, so NULL already means "not global" everywhere else;
+               -- spell it out here rather than lean on Python's falsy None.
+               COALESCE({_global_admin_predicate("au", "u", "$2")}, FALSE) AS is_global
         FROM admin_users au
         LEFT JOIN "user" u ON u.legacy_admin_id = au.user_id
         WHERE au.discord_user_id = $1 AND au.is_active = TRUE
@@ -707,11 +743,11 @@ async def get_admin_scene_rows_for_user(
         game_id,
     )
     if not user:
-        return None
-    if user["role"] in config.GLOBAL_ADMIN_ROLES:
-        return []  # empty = global access (super/platform admins can access all scenes)
+        return AdminAccess(ADMIN_ACCESS_NONE)
+    if user["is_global"]:
+        return AdminAccess(ADMIN_ACCESS_GLOBAL)
 
-    return await _fetch(pool,
+    rows = await _fetch(pool,
         """
         -- Direct scenes
         SELECT scene_id, game_id::text AS game_id
@@ -731,20 +767,4 @@ async def get_admin_scene_rows_for_user(
         user["user_id"],
         game_id,
     )
-
-
-async def get_admin_scenes_for_user(
-    pool: asyncpg.Pool, discord_user_id: str, game_id: str | None
-) -> list[int] | None:
-    """``get_admin_scene_rows_for_user`` reduced to distinct scene ids.
-
-    Same None / empty-list contract. Use this for permission checks; use the rows
-    helper when the game each assignment belongs to matters (``/mystats``).
-    """
-    rows = await get_admin_scene_rows_for_user(pool, discord_user_id, game_id)
-    if rows is None:
-        return None
-    seen: dict[int, None] = {}
-    for r in rows:
-        seen.setdefault(r["scene_id"], None)
-    return list(seen)
+    return AdminAccess(ADMIN_ACCESS_SCOPED, tuple(rows))
