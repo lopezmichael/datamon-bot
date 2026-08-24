@@ -366,7 +366,7 @@ function).**
   across every game** instead of digimon's, per A3.1. Discord roles are one flat namespace,
   so the sync has to answer "what is this person, at most?".
 - **Digest** (`cogs/digest.py`) — per-game sections. The game list is
-  `db.get_games_with_scene_coverage`: active games in `games` that have at least one active
+  `db.get_live_games` (was `get_games_with_scene_coverage`): games that have at least one active
   `scene_games` row for an active metro/online scene, ordered by scene count descending, so
   Digimon leads today without the bot knowing Digimon is special. Each section runs that
   game's dormant scenes, unassigned scenes, deactivated stores and its own cascade mentions.

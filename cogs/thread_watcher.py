@@ -50,13 +50,19 @@ class ThreadWatcher(commands.Cog):
     ) -> None:
         """Post instructions and admin mentions for app-created threads."""
         request_type = request["request_type"]
-        instructions = messages.app_thread_message(channel_type, request_type)
+        # The game travels with the request row, so the thread can say whose it is.
+        # #scene-requests and #bug-reports are shared across games and the teams
+        # are not \u2014 an untitled "New Scene Request" makes every admin open it to
+        # find out whether it is theirs.
+        game_label = self.bot.games.label(request["game_id"], default="")
+        instructions = messages.app_thread_message(channel_type, request_type, game_label)
 
         if not instructions:
             # Fallback: unknown request_type in this channel
             label = config.FORUM_CHANNELS[thread.parent_id]["label"]
+            scope = f" ({game_label})" if game_label else ""
             instructions = (
-                f"\U0001f4cb **New request received!**\n"
+                f"\U0001f4cb **New request received!**{scope}\n"
                 f"React \u2705 on the first message to mark this as {label.lower()}."
             )
 
@@ -156,7 +162,11 @@ class ThreadWatcher(commands.Cog):
             except discord.HTTPException:
                 log.warning("Cannot apply New tag to thread %s", thread.id)
 
-        welcome = messages.manual_thread_message(channel_type)
+        # No request row here, so no game. The copy asks the poster which game they
+        # mean and names the ones DigiLab covers, rather than assuming.
+        welcome = messages.manual_thread_message(
+            channel_type, self.bot.games.live_labels()
+        )
 
         if not welcome:
             return

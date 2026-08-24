@@ -12,6 +12,15 @@ from utils import TRANSIENT_LOOP_EXCEPTIONS, LoopFailureAlerter, log_to_discord
 
 log = logging.getLogger(__name__)
 
+# Game-role grants to make per tick. Every grant costs a Discord API call plus a
+# 1-second courtesy sleep, and the first run after the roles are configured has
+# ~200 to make — which would hold the 5-minute loop for three and a half minutes
+# on top of whatever the tier pass is already doing. Capping spreads that first
+# convergence over a few ticks (~25 minutes) and costs nothing afterwards, since
+# a converged run makes zero grants. The remainder is always logged: a cap that
+# truncates silently reads as "everyone is synced".
+MAX_GAME_ROLE_GRANTS_PER_RUN = 40
+
 
 class RoleSync(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -108,6 +117,8 @@ class RoleSync(commands.Cog):
                     except discord.Forbidden:
                         log.warning("Cannot remove role %s from %s", role.name, member)
 
+        await self._sync_game_roles(guild, changes)
+
         # Update bot status
         scene_count = await db.get_scene_count(self.bot.pool)
         activity = discord.Activity(type=discord.ActivityType.watching, name=f"{scene_count} scenes")
@@ -118,6 +129,74 @@ class RoleSync(commands.Cog):
             msg = "**Role Sync**\n" + "\n".join(changes)
             await log_to_discord(msg)
             log.info("Role sync: %d changes", len(changes))
+
+    async def _sync_game_roles(self, guild: discord.Guild, changes: list[str]) -> None:
+        """Grant each admin the Discord role for every game they administer.
+
+        **Additive only. This never removes a game role, and that is the whole
+        design.** The tier roles above are the bot's to own — it is the only thing
+        that grants them, so it can safely take them back. A game role is not: the
+        server's onboarding flow hands the same role to any member who says they
+        play the game, and most of the older membership picked theirs by hand.
+        A reverse pass here would read "not an admin for Gundam" and strip the
+        @Gundam role off several hundred players who never claimed to be one.
+
+        So the rule is one-directional: being an admin for a game is a reason to
+        HAVE the role, never the only reason. Someone who stops administering a
+        game keeps the role, the same as any other member who plays it; if that
+        ever needs undoing it is a deliberate act by a human, not a loop.
+
+        A game with no `DISCORD_GAME_ROLE_<GAME>` env var is skipped silently —
+        that is the state every game starts in.
+        """
+        if not config.GAME_ROLES:
+            return
+
+        # discord_user_id → the game roles that user's assignments earn them.
+        wanted: dict[int, set[int]] = {}
+        for row in await db.get_admin_game_ids(self.bot.pool):
+            role_id = config.GAME_ROLES.get(row["game_id"])
+            if not role_id:
+                continue
+            try:
+                discord_id = int(row["discord_user_id"])
+            except (TypeError, ValueError):
+                continue
+            wanted.setdefault(discord_id, set()).add(role_id)
+
+        granted = 0
+        pending = 0
+        for discord_id, role_ids in wanted.items():
+            member = guild.get_member(discord_id)
+            if not member:
+                continue
+
+            missing = role_ids - {r.id for r in member.roles}
+            for role_id in sorted(missing):
+                role = guild.get_role(role_id)
+                if not role:
+                    # A configured ID that is not a role in this guild. Warn once
+                    # per pass per member rather than alerting: the boot-time
+                    # forum check is the model, but roles have no equivalent yet.
+                    log.warning("Game role %s not found in guild", role_id)
+                    continue
+                if granted >= MAX_GAME_ROLE_GRANTS_PER_RUN:
+                    pending += 1
+                    continue
+                try:
+                    await member.add_roles(role, reason="Datamon game-role sync")
+                    changes.append(f"Added **{role.name}** to {member.mention} (game admin)")
+                    granted += 1
+                    await asyncio.sleep(1)
+                except discord.Forbidden:
+                    log.warning("Cannot add game role %s to %s", role.name, member)
+
+        if pending:
+            log.info(
+                "Game-role sync capped at %d grants this run — %d still pending, "
+                "next tick continues",
+                MAX_GAME_ROLE_GRANTS_PER_RUN, pending,
+            )
 
     @sync_roles.before_loop
     async def before_sync(self) -> None:

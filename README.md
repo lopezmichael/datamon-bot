@@ -1,6 +1,6 @@
 # Datamon Bot
 
-Discord bot for [DigiLab](https://app.digilab.cards) — Digimon TCG Tournament Tracker.
+Discord bot for [DigiLab](https://app.digilab.cards) — tournament tracking for Bandai TCGs (Digimon and Gundam today; the bot reads the live list from the database and names no game in code).
 
 Handles role sync, slash commands, react-to-resolve, thread lifecycle automation, and new-thread instructions for the DigiLab Discord server.
 

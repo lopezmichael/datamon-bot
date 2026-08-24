@@ -68,7 +68,6 @@ class Commands(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.scene_cache: list[tuple[str, str]] = []  # (slug, display_name)
-        self.game_cache: dict[str, str] = {}  # game_id -> short_name
         # 5-minute loop, and the cache stays usable while stale — two
         # consecutive failures before alerting.
         self._alerter = LoopFailureAlerter("Scene cache refresh loop", threshold=2)
@@ -84,19 +83,38 @@ class Commands(commands.Cog):
         scenes = await db.get_scenes(self.bot.pool)
         self.scene_cache = [(r["slug"], r["display_name"]) for r in scenes if r["slug"]]
         # Games ride the same loop: the list changes once a year at most, and a
-        # slash command must not spend a round trip resolving a display name.
-        await self._refresh_games()
-
-    async def _refresh_games(self) -> None:
-        """Reload the game cache. Also called on demand when it is still cold."""
-        games = await db.get_active_games(self.bot.pool)
-        self.game_cache = {r["game_id"]: r["short_name"] or r["game_id"] for r in games}
+        # slash command must not spend a round trip resolving a display name. The
+        # cache lives on the bot (games.py) because thread_watcher and the digest
+        # need the same answers this cog does.
+        await self.bot.games.refresh(self.bot.pool)
 
     def _game_label(self, game_id: str | None) -> str:
-        """Display name for a game id, falling back to the id itself."""
-        if not game_id:
-            return "All games"
-        return self.game_cache.get(game_id, game_id)
+        return self.bot.games.label(game_id)
+
+    async def _game_ok(
+        self, interaction: discord.Interaction, game: str | None
+    ) -> bool:
+        """Validate a `game` argument, replying and returning False if it is bogus.
+
+        A cold cache must not become a silent yes: refresh once rather than
+        skipping validation, or an arbitrary string binds, matches no assignment
+        row, and renders a plausible-looking empty answer for a game that does not
+        exist.
+
+        Validated against `known_ids` — every game that exists — NOT the live set.
+        Autocomplete offers only live games, so this path is for someone who typed
+        an id by hand, and rejecting a real-but-not-yet-covered game would
+        reproduce the exact symptom this change fixed: "Unknown game" about a game
+        DigiLab has. A typo is still rejected; a real game answers honestly with
+        nothing.
+        """
+        await self.bot.games.ensure(self.bot.pool)
+        if game and game not in self.bot.games.known_ids():
+            await interaction.response.send_message(
+                f"Unknown game `{game}`.", ephemeral=True
+            )
+            return False
+        return True
 
     @tasks.loop(minutes=5)
     async def refresh_scene_cache(self) -> None:
@@ -129,14 +147,17 @@ class Commands(commands.Cog):
         ]
         return matches[:25]
 
-    # Shared autocomplete for the game argument
+    # Shared autocomplete for the game argument. Offers the LIVE games — the ones
+    # with actual scene coverage — in coverage order, so the game this server
+    # mostly runs is the first suggestion. One Piece / Fusion World / Union Arena
+    # exist as catalogue rows with no scenes and are correctly not offered.
     async def game_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
         lower = current.lower()
         return [
             app_commands.Choice(name=name, value=game_id)
-            for game_id, name in sorted(self.game_cache.items())
+            for game_id, name in self.bot.games.live_choices()
             if lower in game_id.lower() or lower in name.lower()
         ][:25]
 
@@ -155,15 +176,7 @@ class Commands(commands.Cog):
             await interaction.response.send_message(f"Scene `{scene}` not found.", ephemeral=True)
             return
 
-        # A cold cache must not become a silent yes: fetch the list once rather
-        # than skipping validation, or an arbitrary string binds, matches no
-        # assignment row, and renders a plausible-looking lone Global block.
-        if not self.game_cache:
-            await self._refresh_games()
-        if game and game not in self.game_cache:
-            await interaction.response.send_message(
-                f"Unknown game `{game}`.", ephemeral=True
-            )
+        if not await self._game_ok(interaction, game):
             return
 
         # game=None asks the cascade for every game at once and tags each tier 1-2
@@ -230,9 +243,14 @@ class Commands(commands.Cog):
 
     # --- /roster ---
     @app_commands.command(name="roster", description="View stores and tournaments for a scene (admin only)")
-    @app_commands.describe(scene="Scene slug (start typing to search)")
-    @app_commands.autocomplete(scene=scene_autocomplete)
-    async def roster_cmd(self, interaction: discord.Interaction, scene: str) -> None:
+    @app_commands.describe(
+        scene="Scene slug (start typing to search)",
+        game="Game to scope to (default: every game, tournament counts combined)",
+    )
+    @app_commands.autocomplete(scene=scene_autocomplete, game=game_autocomplete)
+    async def roster_cmd(
+        self, interaction: discord.Interaction, scene: str, game: str | None = None
+    ) -> None:
         scene_row = await db.get_scene_by_slug(self.bot.pool, scene)
         if not scene_row:
             await interaction.response.send_message(f"Scene `{scene}` not found.", ephemeral=True)
@@ -260,10 +278,16 @@ class Commands(commands.Cog):
                 )
                 return
 
-        stores = await db.get_stores_for_scene(self.bot.pool, scene_row["scene_id"])
+        # Game validated only after the permission check, so an unauthorized caller
+        # gets the access denial rather than feedback about which games exist.
+        if not await self._game_ok(interaction, game):
+            return
+
+        stores = await db.get_stores_for_scene(self.bot.pool, scene_row["scene_id"], game)
         if not stores:
+            scope = f" for **{self._game_label(game)}**" if game else ""
             await interaction.response.send_message(
-                f"No stores found for **{scene_row['display_name']}**.", ephemeral=True
+                f"No stores found for **{scene_row['display_name']}**{scope}.", ephemeral=True
             )
             return
 
@@ -273,24 +297,56 @@ class Commands(commands.Cog):
             location = f"{s['city']}, {s['state']}" if s["state"] else s["city"]
             lines.append(f"**{s['name']}** — {location} ({s['tournament_count']} tournaments){status}")
 
+        title = f"Roster — {scene_row['display_name']}"
+        if game:
+            title += f" ({self._game_label(game)})"
         embed = discord.Embed(
-            title=f"Roster — {scene_row['display_name']}",
-            description="\n".join(lines),
+            title=title,
+            description=fit_embed_description(["\n".join(lines)]),
             color=0x57F287,
+        )
+        # Say what the number covers. Unscoped, those tournament counts blend every
+        # game the store runs — which is a defensible default for a roster but
+        # reads as one game's figure under a bot that used to only have one.
+        embed.set_footer(
+            text=f"Tournament counts: {self._game_label(game)}"
+            if game
+            else "Tournament counts cover every game — pass `game:` to scope"
         )
         await interaction.response.send_message(embed=embed)
 
     # --- /scene ---
     @app_commands.command(name="scene", description="View scene info and stats")
-    @app_commands.describe(scene="Scene slug (start typing to search)")
-    @app_commands.autocomplete(scene=scene_autocomplete)
-    async def scene_cmd(self, interaction: discord.Interaction, scene: str) -> None:
+    @app_commands.describe(
+        scene="Scene slug (start typing to search)",
+        game="Game to scope to (default: a breakdown per game the scene runs)",
+    )
+    @app_commands.autocomplete(scene=scene_autocomplete, game=game_autocomplete)
+    async def scene_cmd(
+        self, interaction: discord.Interaction, scene: str, game: str | None = None
+    ) -> None:
+        """Scene info card, per game.
+
+        Stores, tournaments and players are all per-game facts — `tournaments`
+        and `players` carry `game_id`, stores hang off the `store_games`
+        junction — and this card used to blend them into one set of numbers under
+        a footer that said "Digimon TCG Tournament Tracker". Austin is active for
+        both games with 0 Digimon tournaments and 168 Gundam ones, so the card
+        read "Tournaments 168 · Players 281" for a scene with no Digimon activity
+        at all. Nothing about that display was flagged as approximate.
+
+        So: with a game, everything is scoped to it. Without, the card shows one
+        line per game the scene is active for — including games sitting at zero,
+        which is the number that tells an admin the scene joined and never
+        started.
+        """
         scene_row = await db.get_scene_by_slug(self.bot.pool, scene)
         if not scene_row:
             await interaction.response.send_message(f"Scene `{scene}` not found.", ephemeral=True)
             return
 
-        stats = await db.get_scene_stats(self.bot.pool, scene_row["scene_id"])
+        if not await self._game_ok(interaction, game):
+            return
 
         location_parts = []
         if scene_row["state_region"]:
@@ -299,19 +355,54 @@ class Commands(commands.Cog):
             location_parts.append(scene_row["country"])
         location = ", ".join(location_parts) or "—"
 
+        title = scene_row["display_name"]
+        if game:
+            title += f" ({self._game_label(game)})"
         embed = discord.Embed(
-            title=scene_row["display_name"],
+            title=title,
             url=f"{config.APP_BASE_URL}/?scene={scene_row['slug']}",
             color=0xED4245,
         )
         embed.add_field(name="Location", value=location, inline=True)
         if scene_row["continent"]:
             embed.add_field(name="Continent", value=scene_row["continent"].replace("_", " ").title(), inline=True)
-        if stats:
-            embed.add_field(name="Stores", value=str(stats["store_count"]), inline=True)
-            embed.add_field(name="Tournaments", value=str(stats["tournament_count"]), inline=True)
-            embed.add_field(name="Players", value=str(stats["player_count"]), inline=True)
-        embed.set_footer(text="DigiLab — Digimon TCG Tournament Tracker")
+
+        if game:
+            stats = await db.get_scene_stats(self.bot.pool, scene_row["scene_id"], game)
+            if stats:
+                embed.add_field(name="Stores", value=str(stats["store_count"]), inline=True)
+                embed.add_field(name="Tournaments", value=str(stats["tournament_count"]), inline=True)
+                embed.add_field(name="Players", value=str(stats["player_count"]), inline=True)
+        else:
+            # One query, one row per game — no fan-out per game.
+            rows = await db.get_scene_stats_by_game(self.bot.pool, scene_row["scene_id"])
+            if rows:
+                embed.add_field(
+                    name="Games",
+                    value=" · ".join(self._game_label(r["game_id"]) for r in rows),
+                    inline=False,
+                )
+                for r in rows:
+                    embed.add_field(
+                        name=self._game_label(r["game_id"]),
+                        value=(
+                            f"{r['store_count']} stores\n"
+                            f"{r['tournament_count']} tournaments\n"
+                            f"{r['player_count']} players"
+                        ),
+                        inline=True,
+                    )
+            else:
+                # No scene_games rows at all. Not the same as "no activity", and
+                # the difference is actionable — the scene exists but is joined to
+                # nothing, so no game's digest will ever mention it.
+                embed.add_field(
+                    name="Games",
+                    value="*Not active for any game yet*",
+                    inline=False,
+                )
+
+        embed.set_footer(text=self.bot.games.tagline())
 
         await interaction.response.send_message(embed=embed)
 
@@ -334,13 +425,16 @@ class Commands(commands.Cog):
         # off cached Discord roles, so it still answers instantly.
         await interaction.response.defer(ephemeral=True)
 
+        # Grouped by game, because the queue is no longer one team's. The query
+        # returns only rows with open work, so an empty result means exactly one
+        # thing.
         rows = await db.get_request_summary(self.bot.pool)
         if not rows:
-            await interaction.followup.send("No requests found.", ephemeral=True)
+            await interaction.followup.send("✅ Nothing open right now.", ephemeral=True)
             return
 
         total_open = 0
-        lines = []
+        by_game: dict[str, list[str]] = {}
         for r in rows:
             total_open += r["open_count"]
             label = r["request_type"].replace("_", " ").title()
@@ -354,11 +448,18 @@ class Commands(commands.Cog):
                     line += f" · avg resolve: {avg_hours / 24:.1f}d"
                 else:
                     line += f" · avg resolve: {avg_hours:.1f}h"
-            lines.append(line)
+            by_game.setdefault(r["game_id"], []).append(line)
+
+        # Busiest game first, so whatever needs attention leads.
+        ordered = sorted(by_game, key=lambda g: (-len(by_game[g]), g))
+        blocks = [
+            f"__**{self._game_label(gid)}**__\n" + "\n".join(by_game[gid])
+            for gid in ordered
+        ]
 
         embed = discord.Embed(
             title=f"Open Requests — {total_open} total",
-            description="\n".join(lines),
+            description=fit_embed_description(blocks),
             color=0xFEE75C,
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
@@ -440,21 +541,27 @@ class Commands(commands.Cog):
     async def help_cmd(self, interaction: discord.Interaction) -> None:
         embed = discord.Embed(
             title="Datamon Bot",
-            description="Discord bot for DigiLab — Digimon TCG Tournament Tracker",
+            description=f"Discord bot for {self.bot.games.tagline()}",
             color=0x5865F2,
         )
         embed.add_field(
             name="Commands",
             value=(
                 "**/admins** `[scene]` `[game]` — View admins for a scene\n"
-                "**/roster** `[scene]` — View stores & tournaments (admin only)\n"
-                "**/requests** — Open request summary (admin only)\n"
+                "**/roster** `[scene]` `[game]` — View stores & tournaments (admin only)\n"
+                "**/requests** — Open request summary, by game (admin only)\n"
                 "**/mystats** — Your admin stats (admin only)\n"
-                "**/scene** `[scene]` — View scene info and stats\n"
+                "**/scene** `[scene]` `[game]` — View scene info and stats\n"
                 "**/help** — Show this message"
             ),
             inline=False,
         )
+        # Naming the games explicitly, not just in the tagline: this is the one
+        # command whose whole job is telling someone what the bot can do, and
+        # "which games does this cover" is now part of that answer.
+        games = self.bot.games.live_labels()
+        if games:
+            embed.add_field(name="Games covered", value=" · ".join(games), inline=False)
         embed.add_field(
             name="Features",
             value=(

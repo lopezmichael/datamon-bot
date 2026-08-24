@@ -69,7 +69,13 @@ class Reactions(commands.Cog):
         payload: discord.RawReactionActionEvent,
     ) -> None:
         """Resolve an app-created thread (has DB record)."""
-        if request["status"] == "resolved":
+        # TERMINAL, not just 'resolved'. A request the web REJECTED is finished
+        # and already carries the rejecter's attribution, but its status is
+        # 'rejected' — so this guard used to wave it through and `resolve_request`
+        # rewrote the row to resolved, destroying the original decision. The web's
+        # reject tag lands on the thread but does not close it, so it stays
+        # reactable; 15 rejected requests had live threads when this was found.
+        if request["status"] in db.TERMINAL_STATUSES:
             return
 
         # Permission check: the reactor must hold admin access for the request's game.
@@ -97,8 +103,16 @@ class Reactions(commands.Cog):
             except discord.Forbidden:
                 pass
 
+            # Name the game. A Digimon scene admin reacting on a Gundam thread in
+            # a shared forum is the common case for this denial, and "you need
+            # admin access for this scene" reads as a mistake on our side when
+            # they demonstrably do administer that scene — for the other game.
+            game_label = self.bot.games.label(request["game_id"], default="")
+            scope = f" for **{game_label}**" if game_label else ""
             try:
-                await member.send("You need admin access for this scene to resolve requests.")
+                await member.send(
+                    f"You need admin access{scope} for this scene to resolve requests."
+                )
             except discord.Forbidden:
                 pass
             return
@@ -115,8 +129,10 @@ class Reactions(commands.Cog):
 
         await apply_resolve_tag(channel, guild, forum_config)
 
+        game_label = self.bot.games.label(request["game_id"], default="")
+        scope = f" \u2014 {game_label}" if game_label else ""
         try:
-            await channel.send(f"\u2705 **{label}** by {member.mention}")
+            await channel.send(f"\u2705 **{label}**{scope} by {member.mention}")
         except discord.Forbidden:
             pass
 
@@ -124,7 +140,7 @@ class Reactions(commands.Cog):
         scene_info = f" in scene #{request['scene_id']}" if request["scene_id"] else ""
         await log_to_discord(
             f"Request #{request['id']} **{label.lower()}** by {member.mention}"
-            f"{scene_info} ({request['game_id']})"
+            f"{scene_info} ({self.bot.games.label(request['game_id'])})"
         )
         log.info("Request #%d resolved by %s", request["id"], member)
 

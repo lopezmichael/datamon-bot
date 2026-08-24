@@ -109,7 +109,11 @@ class Digest(commands.Cog):
         await self._alerter.recovered()
 
     async def _run_digest(self) -> None:
-        games = await db.get_games_with_scene_coverage(self.bot.pool)
+        # Coverage-derived, NOT `games.is_active` — that flag is FALSE for Gundam
+        # while Gundam has 16 active scenes, so the pre-fix digest silently
+        # reported on Digimon only and read as a complete picture. See the block
+        # above `db.get_live_games`.
+        games = await db.get_live_games(self.bot.pool)
         if not games:
             # "Couldn't find out" must never render as "nothing to report". Every
             # section below is per-game, so an empty game list produces a silent,

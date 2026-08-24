@@ -126,6 +126,22 @@ ADMIN_ACCESS_GLOBAL = "global"
 ADMIN_ACCESS_SCOPED = "scoped"
 
 
+# `admin_requests.status` has no CHECK constraint. Production holds five values:
+# pending, resolved and rejected, plus the pre-2026 terminal pair approved (30
+# rows) and dismissed (3). Everything in these two sets is FINISHED — nobody owes
+# it an action.
+#
+# They live here, not in a cog, because two surfaces have to agree on them and
+# used not to: `cogs/archiver.py` heals threads by these sets while
+# `get_request_summary` counted open as `status != 'resolved'`, which made every
+# approved / rejected / dismissed row read as open. /requests reported **86 open
+# when 12 were** — the command exists to say what needs attention and was off by
+# 7x, in the safe-looking direction where the number is merely too big.
+RESOLVED_STATUSES = frozenset({"resolved", "approved"})
+REJECTED_STATUSES = frozenset({"rejected", "dismissed"})
+TERMINAL_STATUSES = RESOLVED_STATUSES | REJECTED_STATUSES
+
+
 # ---------------------------------------------------------------------------
 # Query helpers
 # ---------------------------------------------------------------------------
@@ -382,30 +398,109 @@ def select_tier_admins(admins: list[asyncpg.Record]) -> list[asyncpg.Record]:
     return []
 
 
-async def get_stores_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncpg.Record]:
+async def get_stores_for_scene(
+    pool: asyncpg.Pool, scene_id: int, game_id: str | None = None
+) -> list[asyncpg.Record]:
+    """Stores in a scene with their tournament counts, optionally scoped to a game.
+
+    ``stores`` carries no game column — a shop is a shop — so per-game membership
+    lives in the ``store_games`` junction (98 active Gundam rows, 614 Digimon),
+    exactly as it does on the web side. ``tournaments`` DOES carry ``game_id``.
+
+    With a game: only stores active for it, counting only its tournaments. Without:
+    every store, counting every game's tournaments — which is the honest answer to
+    an unscoped question, and `/roster` now says so in the header rather than
+    letting a blended number pass as one game's.
+    """
     return await _fetch(pool,
         """
         SELECT s.store_id, s.name, s.city, s.state, s.is_active,
                COUNT(t.tournament_id) AS tournament_count
         FROM stores s
-        LEFT JOIN tournaments t ON t.store_id = s.store_id
+        LEFT JOIN tournaments t
+          ON t.store_id = s.store_id
+         AND ($2::text IS NULL OR t.game_id = $2::text)
         WHERE s.scene_id = $1
+          AND ($2::text IS NULL OR EXISTS (
+                SELECT 1 FROM store_games sg
+                WHERE sg.store_id = s.store_id
+                  AND sg.game_id = $2::text AND sg.is_active = TRUE
+              ))
         GROUP BY s.store_id, s.name, s.city, s.state, s.is_active
         ORDER BY s.name
         """,
         scene_id,
+        game_id,
     )
 
 
-async def get_scene_stats(pool: asyncpg.Pool, scene_id: int) -> asyncpg.Record | None:
+async def get_scene_stats(
+    pool: asyncpg.Pool, scene_id: int, game_id: str
+) -> asyncpg.Record | None:
+    """Store / tournament / player counts for a scene, for ONE game.
+
+    ``game_id`` is required, with no blended mode, because the blended total is
+    the exact thing that made this function wrong: `/scene austin` reported "168
+    tournaments, 281 players" — every one of them Gundam — under a footer reading
+    "Digimon TCG Tournament Tracker". Refusing to compute that number is a
+    stronger guarantee than documenting that it is dangerous.
+
+    `/scene` with no game argument calls `get_scene_stats_by_game` instead, which
+    answers per game. `get_stores_for_scene` DOES keep an optional game, because
+    `/roster` genuinely wants both and says which it is showing.
+    """
     return await _fetchrow(pool,
         """
         SELECT
-            (SELECT COUNT(*) FROM stores WHERE scene_id = $1 AND is_active = TRUE) AS store_count,
+            (SELECT COUNT(*) FROM stores s
+             WHERE s.scene_id = $1 AND s.is_active = TRUE
+               AND EXISTS (
+                     SELECT 1 FROM store_games sg
+                     WHERE sg.store_id = s.store_id
+                       AND sg.game_id = $2 AND sg.is_active = TRUE
+                   )) AS store_count,
+            -- Tournaments are gated on t.game_id alone, NOT on the store_games
+            -- junction, mirroring digilab-web queries.ts: hanging the history off
+            -- the junction would make a scene whose only venue later closed lose
+            -- its whole event record.
             (SELECT COUNT(*) FROM tournaments t
              JOIN stores s ON t.store_id = s.store_id
-             WHERE s.scene_id = $1) AS tournament_count,
-            (SELECT COUNT(*) FROM players WHERE home_scene_id = $1 AND is_active = TRUE) AS player_count
+             WHERE s.scene_id = $1 AND t.game_id = $2) AS tournament_count,
+            (SELECT COUNT(*) FROM players p
+             WHERE p.home_scene_id = $1 AND p.is_active = TRUE
+               AND p.game_id = $2) AS player_count
+        """,
+        scene_id,
+        game_id,
+    )
+
+
+async def get_scene_stats_by_game(pool: asyncpg.Pool, scene_id: int) -> list[asyncpg.Record]:
+    """One stats row per game the scene is active for, in one round trip.
+
+    Driven by ``scene_games``, so a game the scene joined but has no activity for
+    yet renders as a row of zeros rather than vanishing — "active here, nothing
+    happening" and "not active here" are different facts and the reader has to be
+    able to tell them apart. (Austin is active for both games and has 0 Digimon
+    tournaments; that zero is the useful part.)
+    """
+    return await _fetch(pool,
+        """
+        SELECT g.game_id, g.short_name,
+            (SELECT COUNT(*) FROM stores s
+             JOIN store_games sg ON sg.store_id = s.store_id
+             WHERE s.scene_id = $1 AND s.is_active = TRUE
+               AND sg.game_id = g.game_id AND sg.is_active = TRUE) AS store_count,
+            (SELECT COUNT(*) FROM tournaments t
+             JOIN stores s ON t.store_id = s.store_id
+             WHERE s.scene_id = $1 AND t.game_id = g.game_id) AS tournament_count,
+            (SELECT COUNT(*) FROM players p
+             WHERE p.home_scene_id = $1 AND p.is_active = TRUE
+               AND p.game_id = g.game_id) AS player_count
+        FROM scene_games x
+        JOIN games g ON g.game_id = x.game_id
+        WHERE x.scene_id = $1 AND x.is_active = TRUE
+        ORDER BY g.game_id
         """,
         scene_id,
     )
@@ -435,9 +530,18 @@ async def get_request_by_thread(pool: asyncpg.Pool, thread_id: str) -> asyncpg.R
 async def resolve_request(pool: asyncpg.Pool, thread_id: str, resolved_by: str) -> bool:
     """Mark a request as resolved. Returns True if a row was updated.
 
-    The bot's only write, and the reason `_run` demands idempotence: the
-    ``status != 'resolved'`` guard makes a repeat a no-op, so a retry can never
-    overwrite the original ``resolved_at`` / ``resolved_by``.
+    The bot's only write, and the reason `_run` demands idempotence: the guard
+    makes a repeat a no-op, so a retry can never overwrite the original
+    ``resolved_at`` / ``resolved_by``.
+
+    That guard is ``NOT IN TERMINAL_STATUSES``, not ``!= 'resolved'``, and the
+    difference is a real defect that stood until 2026-08-24. A request the web
+    rejected is finished — it carries a ``resolved_at`` and a ``resolved_by``
+    naming whoever rejected it — but its status is ``'rejected'``, so the old
+    predicate matched, and a ✅ reaction on the still-open thread **flipped a
+    rejection into a resolution and destroyed the original decision's
+    attribution**. 15 rejected requests had live Discord threads when this was
+    found. The bot's one sanctioned write must never reverse a call the web owns.
 
     There is one case the retry cannot resolve honestly: if the UPDATE commits
     and the connection then dies before we see the command tag, the retry matches
@@ -454,10 +558,11 @@ async def resolve_request(pool: asyncpg.Pool, thread_id: str, resolved_by: str) 
         """
         UPDATE admin_requests
         SET status = 'resolved', resolved_at = NOW(), resolved_by = $2
-        WHERE discord_thread_id = $1 AND status != 'resolved'
+        WHERE discord_thread_id = $1 AND status <> ALL($3::text[])
         """,
         thread_id,
         resolved_by,
+        sorted(TERMINAL_STATUSES),
     )
     return result == "UPDATE 1"
 
@@ -490,31 +595,117 @@ async def get_global_admin_discord_ids(
 
 
 async def get_request_summary(pool: asyncpg.Pool) -> list[asyncpg.Record]:
-    """Get open request counts, oldest open, and avg resolution time per request_type."""
+    """Open counts, oldest open and average resolution time per game and request type.
+
+    Two fixes over the pre-multi-game version, both of which made the number say
+    something other than what `/requests` claims to answer:
+
+    * **Open is "not terminal", not "not resolved".** The old filter was
+      ``status != 'resolved'``, so all 41 rejected, 30 approved and 3 dismissed
+      rows counted as awaiting action. The command reported 86 open against a real
+      12. See TERMINAL_STATUSES.
+    * **Grouped by game.** Gundam's requests used to fold into the same
+      per-request-type line as Digimon's, so a Gundam-only backlog was
+      indistinguishable from a Digimon one on a screen that admins triage from.
+
+    Only rows with something open come back. An earlier version returned every
+    game/type pair "so the averages are available", which was not true of any
+    caller: `/requests` renders `avg_resolution_time` only on rows it has already
+    kept for having open work, so a zero-open row's average was computed, sent
+    and dropped.
+    """
     return await _fetch(pool,
         """
-        SELECT request_type,
-               COUNT(*) FILTER (WHERE status != 'resolved') AS open_count,
-               MIN(submitted_at) FILTER (WHERE status != 'resolved') AS oldest_open,
-               COUNT(*) FILTER (WHERE status = 'resolved') AS resolved_count,
-               AVG(resolved_at - submitted_at) FILTER (WHERE status = 'resolved') AS avg_resolution_time
+        SELECT COALESCE(game_id, 'digimon') AS game_id,
+               request_type,
+               COUNT(*) FILTER (WHERE status <> ALL($1::text[])) AS open_count,
+               MIN(submitted_at) FILTER (WHERE status <> ALL($1::text[])) AS oldest_open,
+               COUNT(*) FILTER (WHERE status = ANY($2::text[])) AS resolved_count,
+               AVG(resolved_at - submitted_at)
+                 FILTER (WHERE status = ANY($2::text[])) AS avg_resolution_time
         FROM admin_requests
-        GROUP BY request_type
-        ORDER BY open_count DESC
+        GROUP BY 1, 2
+        HAVING COUNT(*) FILTER (WHERE status <> ALL($1::text[])) > 0
+        ORDER BY open_count DESC, 1, 2
+        """,
+        sorted(TERMINAL_STATUSES),
+        sorted(RESOLVED_STATUSES),
+    )
+
+
+async def get_admin_game_ids(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """Discord user ID → each game that user is an admin for. Powers game-role sync.
+
+    Union of the three places a per-game admin relationship is recorded, because
+    no single one of them is complete: `game_admin_roles` is the tier grant (169
+    Digimon / 11 Gundam), `admin_user_scenes` the scene assignments (187 / 9), and
+    `admin_regions` the regional coverage (8 / 2). Someone can hold a scene for a
+    game without a role row, and vice versa; either makes them that game's admin
+    for the purpose of a Discord game role.
+
+    Super and platform admins are deliberately NOT fanned out to every game here.
+    A game role says "this person works on this game", and the honest answer for a
+    platform admin is the games they actually hold rows in — which is exactly what
+    the tier-3 predicate above already uses to decide who gets paged.
+    """
+    return await _fetch(pool,
+        """
+        SELECT DISTINCT au.discord_user_id, x.game_id::text AS game_id
+        FROM admin_users au
+        LEFT JOIN "user" u ON u.legacy_admin_id = au.user_id
+        JOIN LATERAL (
+            SELECT g.game_id FROM game_admin_roles g WHERE g.user_id = u.id
+            UNION
+            SELECT aus.game_id FROM admin_user_scenes aus WHERE aus.user_id = au.user_id
+            UNION
+            SELECT ar.game_id FROM admin_regions ar WHERE ar.user_id = au.user_id
+        ) x ON TRUE
+        WHERE au.is_active = TRUE AND au.discord_user_id IS NOT NULL
         """
     )
 
 
-async def get_games_with_scene_coverage(pool: asyncpg.Pool) -> list[asyncpg.Record]:
-    """Active games that actually have scenes, most-covered first.
+# ---------------------------------------------------------------------------
+# Games: which ones are live, and what to call them
+# ---------------------------------------------------------------------------
+#
+# **`games.is_active` DOES NOT DECIDE ANYTHING HERE, AND MUST NOT.** It is a
+# second, divergent answer to "is this game live", and it is wrong right now:
+# Gundam is `is_active = FALSE` while carrying 36 active `scene_games` rows, 11
+# `game_admin_roles`, 9 scene assignments, 2 admin regions, 344 tournaments and
+# 36 requests. digilab-web learned this the expensive way — its daily badge cron
+# read the column, returned `["digimon"]`, and every claimed Gundam account went
+# without a badge refresh from launch to 2026-08-21. The failure is silent by
+# construction: the query is valid, the loop runs, the response says ok.
+# `conventions.test.ts` now fails any web file that selects games by it, and
+# `docs/references/multi-game-debt.md` is the ledger.
+#
+# The bot had the same bug in three places, with the same silence: the weekly
+# digest skipped Gundam's scenes entirely, `/admins game:gundam` answered
+# "Unknown game", and a Gundam block on `/admins` rendered under the raw id.
+#
+# Web's replacement is its `activeGameIds()` registry, a TypeScript module we
+# cannot import. The bot's equivalent is the data itself: **a game is live here
+# if it has active scenes.** That is the fact every surface below actually cares
+# about, it cannot drift from a flag nobody remembers to flip, and game #3 needs
+# no code change — it appears the moment it has a scene. Today it yields Digimon
+# (186 scenes) and Gundam (16); One Piece, Fusion World and Union Arena are
+# catalogue-only rows with zero scenes and correctly stay out.
 
-    The weekly digest's game list. Membership is the ``scene_games`` junction —
-    ``scenes`` is shared geography with no game column — so a game with no active
-    scene rows contributes no section rather than an empty one.
+async def get_live_games(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """Games with active scene coverage, most-covered first.
+
+    The one answer to "which games does this Discord actually coordinate?" — used
+    by the weekly digest for its sections and by `/admins` / `/scene` / `/roster`
+    for their game arguments, so a game can never be reported on but unpickable.
+
+    Membership is the ``scene_games`` junction (``scenes`` is shared geography
+    with no game column), so a game with no active scene rows contributes nothing
+    rather than an empty section.
 
     Ordering is by coverage, not by a hardcoded game name: whichever game has the
-    most scenes leads the digest, which keeps Digimon first today without the bot
-    knowing that Digimon is special.
+    most scenes leads, which keeps Digimon first today without the bot knowing
+    that Digimon is special.
     """
     return await _fetch(pool,
         """
@@ -527,27 +718,33 @@ async def get_games_with_scene_coverage(pool: asyncpg.Pool) -> list[asyncpg.Reco
             WHERE sg.game_id = g.game_id AND sg.is_active = TRUE
               AND s.is_active = TRUE AND s.scene_type IN ('metro', 'online')
         ) x ON TRUE
-        WHERE g.is_active = TRUE AND x.scene_count > 0
+        WHERE x.scene_count > 0
         ORDER BY x.scene_count DESC, g.game_id
         """
     )
 
 
-async def get_active_games(pool: asyncpg.Pool) -> list[asyncpg.Record]:
-    """Every active game. Powers the `/admins` game argument's autocomplete."""
-    return await _fetch(pool,
-        "SELECT game_id, short_name FROM games WHERE is_active = TRUE ORDER BY game_id"
-    )
+async def get_game_labels(pool: asyncpg.Pool) -> list[asyncpg.Record]:
+    """Every game row's display name — labelling only, never a liveness test.
+
+    Deliberately unfiltered, and a different question from `get_live_games`. The
+    admin cascade is not games-table-filtered at all, so it can hand back a row
+    for a game with no scene coverage (a stale assignment). That row still has to
+    render as "Gundam", not as `gundam`, or the reader sees a raw id and cannot
+    tell a real game from a typo. Reading the column for DISPLAY is fine; reading
+    it to decide what code DOES is what the comment above forbids.
+    """
+    return await _fetch(pool, "SELECT game_id, short_name FROM games ORDER BY game_id")
 
 
 async def get_games_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncpg.Record]:
-    """Active games this scene is active for, via the ``scene_games`` junction."""
+    """Games this scene is active for, via the ``scene_games`` junction."""
     return await _fetch(pool,
         """
         SELECT g.game_id, g.short_name
         FROM scene_games sg
         JOIN games g ON g.game_id = sg.game_id
-        WHERE sg.scene_id = $1 AND sg.is_active = TRUE AND g.is_active = TRUE
+        WHERE sg.scene_id = $1 AND sg.is_active = TRUE
         ORDER BY g.game_id
         """,
         scene_id,
@@ -671,7 +868,19 @@ async def get_recently_deactivated_stores(
 
 
 async def get_admin_stats(pool: asyncpg.Pool, discord_user_id: str) -> asyncpg.Record:
-    """Get resolution stats for an admin by their Discord user ID (resolved_by)."""
+    """Resolution stats for an admin by their Discord user ID (``resolved_by``).
+
+    Counts RESOLVED_STATUSES, not the bare ``'resolved'`` string this used to
+    match. `/requests` and `/mystats` report the same two facts off the same two
+    columns, and with two different predicates they answered differently by
+    construction — an ``approved`` row counted toward the queue's average and not
+    toward the person who closed it. Rejections and dismissals are deliberately
+    excluded: they are terminal, but they are not resolutions.
+
+    No live Discord account is affected today (every ``approved`` row's
+    ``resolved_by`` is a service account, not a snowflake), so this is the
+    definition being made consistent before it can matter, not a repair.
+    """
     return await _fetchrow(pool,
         """
         SELECT COUNT(*) AS resolved_count,
@@ -679,9 +888,10 @@ async def get_admin_stats(pool: asyncpg.Pool, discord_user_id: str) -> asyncpg.R
                MIN(resolved_at) AS first_resolved,
                MAX(resolved_at) AS last_resolved
         FROM admin_requests
-        WHERE resolved_by = $1 AND status = 'resolved'
+        WHERE resolved_by = $1 AND status = ANY($2::text[])
         """,
         discord_user_id,
+        sorted(RESOLVED_STATUSES),
     )
 
 
