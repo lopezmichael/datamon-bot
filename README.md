@@ -1,12 +1,12 @@
 # Datamon Bot
 
-Discord bot for [DigiLab](https://app.digilab.cards) — Digimon TCG Tournament Tracker.
+Discord bot for [DigiLab](https://app.digilab.cards) — tournament tracking for Bandai TCGs (Digimon and Gundam today; the bot reads the live list from the database and names no game in code).
 
 Handles role sync, slash commands, react-to-resolve, thread lifecycle automation, and new-thread instructions for the DigiLab Discord server.
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.13+ (`requirements.txt` pins `audioop-lts`, which needs 3.13; pip fails on 3.12)
 - Discord bot token with **Server Members** privileged intent enabled
 - Access to the shared Neon PostgreSQL database
 
@@ -24,7 +24,7 @@ python bot.py
 
 | Command | Access | Description |
 |---------|--------|-------------|
-| `/admins [scene]` | Anyone | View admins for a scene |
+| `/admins [scene] [game]` | Anyone | View admins for a scene (default: grouped by game) |
 | `/roster [scene]` | Scene Admin+ | View stores & tournaments |
 | `/requests` | Scene Admin+ | Open request summary |
 | `/mystats` | Scene Admin+ | Personal resolution stats |

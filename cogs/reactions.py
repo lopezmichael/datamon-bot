@@ -69,41 +69,53 @@ class Reactions(commands.Cog):
         payload: discord.RawReactionActionEvent,
     ) -> None:
         """Resolve an app-created thread (has DB record)."""
-        if request["status"] == "resolved":
+        # TERMINAL, not just 'resolved'. A request the web REJECTED is finished
+        # and already carries the rejecter's attribution, but its status is
+        # 'rejected' — so this guard used to wave it through and `resolve_request`
+        # rewrote the row to resolved, destroying the original decision. The web's
+        # reject tag lands on the thread but does not close it, so it stays
+        # reactable; 15 rejected requests had live threads when this was found.
+        if request["status"] in db.TERMINAL_STATUSES:
             return
 
-        # Permission check: reactor must be admin for the request's scene or Platform Admin
+        # Permission check: the reactor must hold admin access for the request's game.
         member = await self._get_member(guild, payload.user_id)
         if not member:
             return
 
-        has_platform = any(r.id == config.ROLE_PLATFORM_ADMIN for r in member.roles)
-        if not has_platform:
-            user_scenes = await db.get_admin_scenes_for_user(
-                self.bot.pool, str(payload.user_id)
-            )
-            # None = not an admin at all; otherwise check scene-level access
-            has_access = (
-                user_scenes is not None
-                and (
-                    len(user_scenes) == 0  # global admin (super/platform)
-                    or not request["scene_id"]  # request has no scene
-                    or request["scene_id"] in user_scenes
-                )
-            )
-            if not has_access:
-                # Remove reaction and DM user
-                try:
-                    msg = await channel.fetch_message(payload.message_id)
-                    await msg.remove_reaction(payload.emoji, member)
-                except discord.Forbidden:
-                    pass
+        # The DB is the authority here, and it is asked on EVERY reaction. The
+        # Discord "Platform Admin" role used to short-circuit this check, and must
+        # not: that role is one flat badge across all games (role_sync grants it from
+        # the strongest role a person holds in ANY game), so honoring it as a bypass
+        # would let a Digimon-only platform admin resolve Gundam requests — the very
+        # thing the per-game fallback exists to prevent. Treat the role as cosmetic
+        # for authorization; `game_admin_roles` decides.
+        access = await db.get_admin_access_for_user(
+            self.bot.pool, str(payload.user_id), request["game_id"]
+        )
+        # Branch on the LEVEL, never on len(rows): 'scoped' with no rows means no
+        # access at all, while 'global' carries no rows by design.
+        if not access.covers(request["scene_id"]):
+            # Remove reaction and DM user
+            try:
+                msg = await channel.fetch_message(payload.message_id)
+                await msg.remove_reaction(payload.emoji, member)
+            except discord.Forbidden:
+                pass
 
-                try:
-                    await member.send("You need admin access for this scene to resolve requests.")
-                except discord.Forbidden:
-                    pass
-                return
+            # Name the game. A Digimon scene admin reacting on a Gundam thread in
+            # a shared forum is the common case for this denial, and "you need
+            # admin access for this scene" reads as a mistake on our side when
+            # they demonstrably do administer that scene — for the other game.
+            game_label = self.bot.games.label(request["game_id"], default="")
+            scope = f" for **{game_label}**" if game_label else ""
+            try:
+                await member.send(
+                    f"You need admin access{scope} for this scene to resolve requests."
+                )
+            except discord.Forbidden:
+                pass
+            return
 
         # Resolve in DB
         resolved = await db.resolve_request(
@@ -117,15 +129,18 @@ class Reactions(commands.Cog):
 
         await apply_resolve_tag(channel, guild, forum_config)
 
+        game_label = self.bot.games.label(request["game_id"], default="")
+        scope = f" \u2014 {game_label}" if game_label else ""
         try:
-            await channel.send(f"\u2705 **{label}** by {member.mention}")
+            await channel.send(f"\u2705 **{label}**{scope} by {member.mention}")
         except discord.Forbidden:
             pass
 
         # Log to #bot-log
         scene_info = f" in scene #{request['scene_id']}" if request["scene_id"] else ""
         await log_to_discord(
-            f"Request #{request['id']} **{label.lower()}** by {member.mention}{scene_info}"
+            f"Request #{request['id']} **{label.lower()}** by {member.mention}"
+            f"{scene_info} ({self.bot.games.label(request['game_id'])})"
         )
         log.info("Request #%d resolved by %s", request["id"], member)
 

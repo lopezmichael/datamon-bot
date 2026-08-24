@@ -124,8 +124,46 @@ ROLE_MAP: dict[str, int] = {
 # Roles with global scene access (treated equivalently in datamon)
 GLOBAL_ADMIN_ROLES: set[str] = {"super_admin", "platform_admin"}
 
-# Set of all DigiLab role IDs for quick membership checks
+# Set of all DigiLab role IDs for quick membership checks.
+#
+# The three TIER roles only. Deliberately does not include the per-game roles
+# below, and must not: role_sync's reverse pass strips every role in this set
+# from anyone who is not an active admin, and a game role is also handed out by
+# Discord onboarding to members who self-select a game. Adding them here would
+# make the bot quietly revoke people's own onboarding picks every five minutes.
 DIGILAB_ROLE_IDS: set[int] = {ROLE_PLATFORM_ADMIN, ROLE_REGIONAL_ADMIN, ROLE_SCENE_ADMIN}
+
+
+def _game_roles() -> dict[str, int]:
+    """Per-game Discord roles, keyed by `game_id`, from `DISCORD_GAME_ROLE_<GAME>`.
+
+    So `DISCORD_GAME_ROLE_DIGIMON=123` maps game_id 'digimon' to role 123. Env
+    discovery rather than three named `_require_int` constants for the reason the
+    rest of PR 4 exists: a fourth game must not be a code change. Add the var,
+    restart, done.
+
+    **Optional, unlike every other ID in this file.** The bot fails fast on a
+    missing env var everywhere else because those IDs are load-bearing — without
+    them a loop silently no-ops. This one degrades honestly: no var for a game
+    means that game's role simply is not synced, which is the correct behaviour
+    while the roles are still being rolled out, and is visible in #bot-log's
+    startup line rather than inferred.
+    """
+    prefix = "DISCORD_GAME_ROLE_"
+    roles: dict[str, int] = {}
+    for name, value in os.environ.items():
+        if not name.startswith(prefix) or not value.strip():
+            continue
+        game_id = name[len(prefix):].lower()
+        try:
+            roles[game_id] = int(value)
+        except ValueError:
+            raise RuntimeError(f"{name} must be a Discord role ID, got {value!r}")
+    return roles
+
+
+# game_id → Discord role ID. Granted additively by role_sync, never removed.
+GAME_ROLES: dict[str, int] = _game_roles()
 
 # App base URL
 APP_BASE_URL = "https://digilab.cards"

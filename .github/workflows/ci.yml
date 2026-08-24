@@ -1,0 +1,110 @@
+# CI gate for release PRs (develop -> main), feature PRs into develop, and
+# develop pushes. Mirrors digilab-web's ci.yml in shape and intent.
+#
+# Railway auto-deploys `main`, so a merge into main IS the production deploy.
+# That makes the develop -> main PR the only place anything gets checked before
+# it is live, and this workflow is what makes that check real. Enable branch
+# protection on main requiring "test" to pass, or the gate is advisory.
+#
+# Three steps, in the order their failures are cheapest to diagnose:
+#
+#   compile  — syntax only. Catches a broken file instantly, before a slower
+#              step buries the cause in a traceback.
+#   imports  — loads every module the way boot does. FIVE OF THE SEVEN COGS are
+#              imported by no test (archiver, nudge, reactions, role_sync,
+#              thread_watcher), so a module-level NameError in any of them
+#              currently reaches production and shows up as a Railway crash
+#              loop. compileall cannot see it; this can.
+#   tests    — tests/run.py, which includes the conventions ratchets.
+#
+# `tests/run.py` rather than a shell loop, and this matters: the documented
+# `for t in tests/*.py; do python "$t"; done` returns the exit status of its LAST
+# command, so a failure in any earlier file exits 0. Verified. A loop here would
+# be a green check that cannot fail.
+name: CI
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [develop]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13 is the real floor, not the 3.12 the docs claimed until 2026-08-24:
+        # requirements.txt pins audioop-lts, whose Requires-Python is >=3.13
+        # (discord.py needs the audioop stdlib module that 3.13 removed), so
+        # `pip install` on 3.12 fails outright.
+        #
+        # Both versions run because nothing pins the interpreter for deploy —
+        # nixpacks picks it, and it can move under us on a Railway image bump.
+        # Testing the floor and the current local version brackets that range.
+        python-version: ['3.13', '3.14']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Compile (syntax)
+        run: python -m compileall -q bot.py config.py db.py games.py messages.py utils.py cogs scripts tests
+
+      - name: Imports (every module, the way boot loads them)
+        # Inert dummies for all 28 vars config.py fail-fasts on. Values are never
+        # used: importing a cog defines its class, nothing calls setup(), so no
+        # loop starts, no pool is created and no socket opens.
+        #
+        # Listed explicitly rather than derived from config.py ON PURPOSE. When
+        # someone adds a required var, this job goes red — which is the reminder
+        # that Railway needs the real value too, before the bot crash-loops on
+        # boot. A self-updating list would make that silent.
+        env:
+          DISCORD_BOT_TOKEN: ci-dummy-token
+          DISCORD_GUILD_ID: '1'
+          DISCORD_ROLE_PLATFORM_ADMIN: '1'
+          DISCORD_ROLE_REGIONAL_ADMIN: '1'
+          DISCORD_ROLE_SCENE_ADMIN: '1'
+          DISCORD_CHANNEL_SCENE_REQUESTS: '1'
+          DISCORD_CHANNEL_BUG_REPORTS: '1'
+          DISCORD_CHANNEL_FEATURE_REQUESTS: '1'
+          DISCORD_TAG_ONBOARDED: '1'
+          DISCORD_TAG_FIXED: '1'
+          DISCORD_TAG_SHIPPED: '1'
+          DISCORD_TAG_NEW_BUG_REPORTS: '1'
+          DISCORD_TAG_UNDER_REVIEW_BUG_REPORTS: '1'
+          DISCORD_TAG_CONFIRMED_BUG_REPORTS: '1'
+          DISCORD_TAG_WONT_FIX: '1'
+          DISCORD_TAG_NEW_FEATURE_REQUESTS: '1'
+          DISCORD_TAG_PLANNED_FEATURE_REQUESTS: '1'
+          DISCORD_TAG_NOT_PLANNED: '1'
+          DISCORD_TAG_NEW_SCENE_REQUESTS: '1'
+          DISCORD_TAG_NEEDS_MORE_INFO_SCENE_REQUESTS: '1'
+          DISCORD_TAG_NEEDS_ADMIN_SCENE_REQUESTS: '1'
+          DISCORD_TAG_ON_HOLD: '1'
+          DISCORD_WEBHOOK_BOT_LOG: https://discord.com/api/webhooks/1/ci-dummy
+          DISCORD_WEBHOOK_ADMIN_DIGEST: https://discord.com/api/webhooks/1/ci-dummy
+          NEON_HOST: 127.0.0.1
+          NEON_DATABASE: ci
+          NEON_USER: ci
+          NEON_PASSWORD: ci
+        run: python scripts/check_imports.py
+
+      - name: Tests (incl. conventions ratchets)
+        # No env deliberately. Every file in tests/ runs with no .env, no database
+        # and no Discord credentials — dev, preview and local all point at
+        # production's Neon instance, so a test that connects is a test that can
+        # write to prod. If this step ever needs a secret, something is wrong with
+        # the test, not with CI.
+        run: python tests/run.py

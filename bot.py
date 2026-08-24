@@ -8,7 +8,8 @@ from discord.ext import commands
 
 import config
 import db
-from utils import check_forum_config
+from games import GameCache
+from utils import check_forum_config, check_game_roles
 
 log = logging.getLogger(__name__)
 
@@ -21,9 +22,24 @@ class DatamonBot(commands.Bot):
         intents.members = True
         super().__init__(command_prefix="!", intents=intents)
         self._forum_config_checked = False
+        # Shared across cogs — see games.py. Created here rather than in the
+        # commands cog so a cog that loads first can still read it.
+        self.games = GameCache()
 
     async def setup_hook(self) -> None:
         self.pool = await db.create_pool()
+        # Warm the cache the bot owns, before any cog loads.
+        #
+        # NOT because a gateway event could beat it — setup_hook runs before the
+        # gateway connects, so cogs always load first and the commands cog's
+        # cog_load warms it anyway. The reason is ownership: `bot.games` is read by
+        # thread_watcher, nudge and reactions, and only the commands cog refreshes
+        # it. Warming here means nothing depends on that cog's load order, or on
+        # its loading at all.
+        try:
+            await self.games.refresh(self.pool)
+        except Exception:
+            log.exception("Initial game cache refresh failed — starting cold")
 
         cog_names = [
             "cogs.role_sync",
@@ -69,6 +85,7 @@ class DatamonBot(commands.Bot):
             if digilab_guild:
                 self._forum_config_checked = True
                 await check_forum_config(digilab_guild)
+                await check_game_roles(digilab_guild, self.games)
             else:
                 log.error(
                     "Guild %s not in cache at on_ready — skipping forum config check",
