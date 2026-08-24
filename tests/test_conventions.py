@@ -41,7 +41,9 @@ def _source_files() -> list[Path]:
     self-defeating.
     """
     return sorted(
-        [p for p in REPO_ROOT.glob("*.py")] + [p for p in (REPO_ROOT / "cogs").glob("*.py")]
+        [p for p in REPO_ROOT.glob("*.py")]
+        + [p for p in (REPO_ROOT / "cogs").glob("*.py")]
+        + [p for p in (REPO_ROOT / "scripts").glob("*.py")]
     )
 
 
@@ -193,7 +195,10 @@ def test_no_direct_pool_calls() -> None:
 def test_the_scanners_actually_see_the_codebase() -> None:
     """A ratchet over zero files passes forever. Pin that it found the real modules."""
     files = {_rel(p) for p in _source_files()}
-    for expected in ("db.py", "games.py", "messages.py", "utils.py", "cogs/commands.py"):
+    for expected in (
+        "db.py", "games.py", "messages.py", "utils.py",
+        "cogs/commands.py", "scripts/check_imports.py",
+    ):
         assert expected in files, f"{expected} missing from the scan set"
 
     literals = sum(1 for _ in _string_literals(REPO_ROOT / "messages.py"))

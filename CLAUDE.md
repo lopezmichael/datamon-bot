@@ -14,11 +14,15 @@ cp .env.example .env        # Fill in all values
 python bot.py
 ```
 
-Requires Python 3.12+. All env vars are required — the bot fails fast on missing values.
+Requires **Python 3.13+** — `requirements.txt` pins `audioop-lts` (discord.py needs the `audioop` module 3.13 removed), whose `Requires-Python` is `>=3.13`, so `pip install` fails on 3.12. The docs said 3.12+ until 2026-08-24 and were wrong. Nothing pins the interpreter for deploy — nixpacks picks it — so CI tests 3.13 and 3.14 to bracket the range.
+
+All env vars are required — the bot fails fast on missing values.
 
 ## Project Structure
 
 ```
+.github/workflows/  # CI: compile, import-check, tests
+scripts/            # check_imports.py — loads every module the way boot does
 bot.py              # Entry point, DatamonBot subclass, lifecycle
 config.py           # Env vars, ROLE_MAP, FORUM_CHANNELS
 db.py               # asyncpg pool, all query helpers, dead-connection retry
@@ -37,7 +41,7 @@ cogs/
 
 ## Key Conventions
 
-- **Python 3.12+**, async throughout (discord.py + asyncpg)
+- **Python 3.13+**, async throughout (discord.py + asyncpg)
 - All config via environment variables loaded in `config.py` — never hardcode IDs or secrets
 - Database queries live in `db.py` — cogs call helpers, not raw SQL
 - **Never read `games.is_active` to decide behaviour.** It is a divergent second answer to
@@ -95,11 +99,29 @@ No pytest, no CI. Two kinds of standalone test file, both stdlib only:
   **Every check is mutation-verified.** If you change one, break the thing it guards and
   confirm it fails before trusting it — a ratchet that can't fail reads as coverage.
 
-Run them with the venv's interpreter:
+Run them with **`tests/run.py`**, never a shell loop:
 
 ```bash
-for t in tests/*.py; do .venv/bin/python "$t"; done
+.venv/bin/python tests/run.py          # every test file, truthful exit code
+.venv/bin/python scripts/check_imports.py   # every module imports (needs a full .env)
 ```
+
+The loop this replaced — `for t in tests/*.py; do python "$t"; done` — **could not
+fail**: a `for` loop exits with the status of its LAST command, so a failure in any
+earlier file returned 0. `tests/run.py` aggregates, and also fails a file that exits
+clean having asserted nothing.
+
+`scripts/check_imports.py` is separate because five of the seven cogs are imported by
+no test at all, so a module-level error in them reaches production as a Railway crash
+loop. It needs real env vars (it loads the modules the way boot does), which is exactly
+why it is not in `tests/`.
+
+## CI
+
+`.github/workflows/ci.yml` runs compile → imports → tests on PRs into `main` and
+`develop`, and on pushes to `develop`. **Railway auto-deploys `main`, so the
+`develop → main` PR is the only gate before production** — it needs branch protection
+requiring the `test` check, or CI is advisory.
 
 Everything else is verified manually against a live Discord server — see `NEXT_STEPS.md`.
 

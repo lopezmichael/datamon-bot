@@ -6,7 +6,7 @@ Handles role sync, slash commands, react-to-resolve, thread lifecycle automation
 
 ## Prerequisites
 
-- Python 3.12+
+- Python 3.13+ (`requirements.txt` pins `audioop-lts`, which needs 3.13; pip fails on 3.12)
 - Discord bot token with **Server Members** privileged intent enabled
 - Access to the shared Neon PostgreSQL database
 
