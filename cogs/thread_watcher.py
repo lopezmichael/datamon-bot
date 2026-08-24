@@ -50,13 +50,19 @@ class ThreadWatcher(commands.Cog):
     ) -> None:
         """Post instructions and admin mentions for app-created threads."""
         request_type = request["request_type"]
-        instructions = messages.app_thread_message(channel_type, request_type)
+        # The game travels with the request row, so the thread can say whose it is.
+        # #scene-requests and #bug-reports are shared across games and the teams
+        # are not \u2014 an untitled "New Scene Request" makes every admin open it to
+        # find out whether it is theirs.
+        game_label = self.bot.games.label(request["game_id"], default="")
+        instructions = messages.app_thread_message(channel_type, request_type, game_label)
 
         if not instructions:
             # Fallback: unknown request_type in this channel
             label = config.FORUM_CHANNELS[thread.parent_id]["label"]
+            scope = f" ({game_label})" if game_label else ""
             instructions = (
-                f"\U0001f4cb **New request received!**\n"
+                f"\U0001f4cb **New request received!**{scope}\n"
                 f"React \u2705 on the first message to mark this as {label.lower()}."
             )
 
@@ -76,16 +82,24 @@ class ThreadWatcher(commands.Cog):
         # stays because the branch is data-driven, not channel-driven: any row that does
         # carry a scene_id still routes by scene. (store_request / data_error stopped
         # threading entirely — they flow through the admin UI and the daily #admin-digest.)
+        #
+        # Both branches are scoped to the request's own game (PR 4): the cascade only
+        # considers that game's scene/regional admins, and the scene-less branch only
+        # that game's global admins. A Gundam request must not page the Digimon team.
         if request["scene_id"]:
             admin_ids = [
                 a["discord_user_id"]
                 for a in db.select_tier_admins(
-                    await db.get_admins_for_scene(self.bot.pool, request["scene_id"])
+                    await db.get_admins_for_scene(
+                        self.bot.pool, request["scene_id"], request["game_id"]
+                    )
                 )
                 if a["discord_user_id"]
             ]
         else:
-            admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
+            admin_ids = await db.get_global_admin_discord_ids(
+                self.bot.pool, request["game_id"]
+            )
         if not admin_ids:
             return
 
@@ -148,7 +162,11 @@ class ThreadWatcher(commands.Cog):
             except discord.HTTPException:
                 log.warning("Cannot apply New tag to thread %s", thread.id)
 
-        welcome = messages.manual_thread_message(channel_type)
+        # No request row here, so no game. The copy asks the poster which game they
+        # mean and names the ones DigiLab covers, rather than assuming.
+        welcome = messages.manual_thread_message(
+            channel_type, self.bot.games.live_labels()
+        )
 
         if not welcome:
             return
@@ -159,7 +177,9 @@ class ThreadWatcher(commands.Cog):
             log.warning("Cannot send welcome to thread %s", thread.id)
             return
 
-        # Mention platform admins for manual scene requests and bug reports
+        # Mention platform admins for manual scene requests and bug reports. A manual
+        # thread has no request row, so there is no game to scope to — this is the one
+        # place that legitimately asks for the global admins of every game.
         if channel_type in ("scene_requests", "bug_reports"):
             admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
             if admin_ids:

@@ -112,11 +112,15 @@ class Nudge(commands.Cog):
                 kind, days = action
 
                 if kind == "nudge":
-                    mentions = await self._get_mentions(thread, channel_id)
+                    mentions, game_label = await self._get_mentions(thread, channel_id)
+                    scope = f" ({game_label})" if game_label else ""
                     try:
+                        # Must still start with the bell: _evaluate counts prior
+                        # nudges by that prefix, and a reminder it cannot recognise
+                        # is a reminder that repeats forever.
                         await thread.send(
-                            f"\U0001f514 **Reminder** — This thread has had no activity for {days} days. "
-                            f"{mentions}"
+                            f"\U0001f514 **Reminder**{scope} — This thread has had no "
+                            f"activity for {days} days. {mentions}"
                         )
                         nudged.append(thread.name)
                         await asyncio.sleep(1)
@@ -183,14 +187,26 @@ class Nudge(commands.Cog):
             return ("nudge", age.days)
         return None
 
-    async def _get_mentions(self, thread: discord.Thread, channel_id: int) -> str:
-        """Build mention string for the relevant admins."""
+    async def _get_mentions(self, thread: discord.Thread, channel_id: int) -> tuple[str, str]:
+        """Mentions for the relevant admins, and the game to label the nudge with.
+
+        Returns the game's display name alongside the mentions so the reminder can
+        say which game it is about. The people pinged are already the right team —
+        the cascade is game-scoped — but the thread they are pinged back into sits
+        in a forum shared by every game. An empty label means a manual thread,
+        which genuinely has no game.
+        """
         # Check if this is an app-created thread with a scene
         request = await db.get_request_by_thread(self.bot.pool, str(thread.id))
+        game_label = (
+            self.bot.games.label(request["game_id"], default="") if request else ""
+        )
 
         if request and request["scene_id"]:
             admins = db.select_tier_admins(
-                await db.get_admins_for_scene(self.bot.pool, request["scene_id"])
+                await db.get_admins_for_scene(
+                    self.bot.pool, request["scene_id"], request["game_id"]
+                )
             )
             parts = []
             seen: set[str] = set()
@@ -200,14 +216,17 @@ class Nudge(commands.Cog):
                     seen.add(did)
                     parts.append(f"<@{did}>")
             if parts:
-                return " ".join(parts)
+                return " ".join(parts), game_label
 
-        # Fallback: ping global admins
-        admin_ids = await db.get_global_admin_discord_ids(self.bot.pool)
+        # Fallback: ping global admins — of the request's game when we have one, of
+        # every game for a manual thread with no request row.
+        admin_ids = await db.get_global_admin_discord_ids(
+            self.bot.pool, request["game_id"] if request else None
+        )
         if admin_ids:
-            return " ".join(f"<@{uid}>" for uid in admin_ids)
+            return " ".join(f"<@{uid}>" for uid in admin_ids), game_label
 
-        return ""
+        return "", game_label
 
     @nudge_stale.before_loop
     async def before_nudge(self) -> None:

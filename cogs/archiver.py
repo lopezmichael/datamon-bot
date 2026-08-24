@@ -23,12 +23,9 @@ COMPLETION_TAGS: dict[int, timedelta] = {
     config.TAG_ON_HOLD: timedelta(weeks=1),
 }
 
-# `admin_requests.status` has no CHECK constraint. Alongside pending/resolved/
-# rejected, production still holds the pre-2026 terminal pair approved (30 rows)
-# and dismissed (3 rows) — see digilab-web `src/lib/admin-requests.test.ts`.
-# They are terminal too, so heal them the same way. Anything else is left alone.
-RESOLVED_STATUSES = {"resolved", "approved"}
-REJECTED_STATUSES = {"rejected", "dismissed"}
+# The terminal status sets live in db.py — see the block above RESOLVED_STATUSES
+# there for why. Read from db directly rather than aliasing: nothing imports them
+# from this module, and a local alias is one more name to keep in step.
 
 
 class Archiver(commands.Cog):
@@ -171,14 +168,14 @@ class Archiver(commands.Cog):
 
         status = request["status"]
 
-        if status in RESOLVED_STATUSES:
+        if status in db.RESOLVED_STATUSES:
             if await apply_resolve_tag(thread, guild, forum_config):
                 healed.append(thread.name)
                 log.info("Healed thread %s — resolved in app but untagged", thread.id)
                 await asyncio.sleep(1)
             return
 
-        if status in REJECTED_STATUSES:
+        if status in db.REJECTED_STATUSES:
             tag_id = forum_config.get("reject_tag") or forum_config["resolve_tag"]
             if await apply_resolve_tag(thread, guild, forum_config, tag_id):
                 healed_rejected.append(thread.name)

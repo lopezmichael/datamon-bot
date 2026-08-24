@@ -98,6 +98,13 @@ resolvable by any active admin — `:80-106`), then `UPDATE admin_requests SET
 status='resolved', resolved_at, resolved_by` (`db.py:240-251`), apply the channel's resolve
 tag + strip the channel's initial tags (`:187-210`), confirm in-thread, log.
 
+> **Superseded 2026-08-13 by PR 4** (see the forward-plan doc). The permission check is now
+> `db.get_admin_access_for_user(pool, discord_user_id, request.game_id)` and branches on an
+> explicit access level, per game. Two changes to the description above: the Discord Platform
+> Admin role is no longer a bypass (it is one flat badge across games, so the DB decides), and
+> a scene-less request is resolvable by an active admin **of that request's game**, not by any
+> active admin.
+
 No `request_type` reference anywhere in the path. **`feature_request` works with zero bot
 changes** the moment the web app writes `discord_thread_id` back, *provided* the thread lands
 in a registered forum channel. What channel choice affects:

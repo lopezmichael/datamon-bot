@@ -201,6 +201,103 @@ async def check_forum_config(guild: discord.Guild) -> None:
     )
 
 
+def classify_game_roles(
+    configured, live_ids: set[str], known_ids: set[str]
+) -> dict[str, list[str]]:
+    """Sort configured game roles into the four states described on `check_game_roles`.
+
+    Pure — no Discord, no DB, no config — so it is tested in tests/test_game_copy.py.
+    `configured` is any iterable of game ids (in practice `config.GAME_ROLES`),
+    `live_ids` the games with scene coverage, `known_ids` every row in `games`.
+
+    The distinction that matters is `staged` vs `no_row`: both are configured and
+    grant nothing today, but a staged game starts working on its own and a game
+    with no row never will. Collapsing them into one "not granting" bucket is what
+    would let a typo hide behind a legitimately early role.
+    """
+    return {
+        "syncing": sorted(g for g in configured if g in live_ids),
+        "staged": sorted(g for g in configured if g in known_ids and g not in live_ids),
+        "no_row": sorted(g for g in configured if g not in known_ids),
+        "unconfigured": sorted(g for g in live_ids if g not in configured),
+    }
+
+
+async def check_game_roles(guild: discord.Guild, games) -> None:
+    """Classify every configured game role at boot, and say so. Non-fatal.
+
+    `config.GAME_ROLES` is the one optional ID set in the bot, because the roles
+    are mid-rollout and deliberately run AHEAD of the platform — roles exist in
+    Discord for games DigiLab has not launched, and in one case (naruto) for a
+    game with no `games` row at all. That is the right way to stage them, and it
+    is also why this check has to be precise: a role configured for a game the
+    database has never heard of behaves *identically* to a typo'd env var.
+    Both parse, both are valid snowflakes, both grant nothing, forever, in
+    silence. The bot cannot tell intent apart from a slip — but it can name the
+    state exactly, so a human reading one log line can.
+
+    Five states, only one of which is actionable on its own:
+
+    * **syncing** — configured, and the game has scene coverage. Granting today.
+    * **staged** — configured, has a `games` row, no scene coverage yet. Grants
+      nothing only because no admin holds that game; `_sync_game_roles` follows
+      ADMIN ROWS, not coverage, so the first `game_admin_roles` row for it starts
+      handing the role out. Nothing to do, but it is not inert by design.
+    * **no game row** — configured, but no row in `games`. Cannot grant until the
+      row exists. Deliberate for a game announced before launch; a typo otherwise.
+    * **unconfigured** — live, with admins, and no env var. Those admins silently
+      get no role, so this logs at WARNING even though nothing is broken.
+    * **bad role ID** — points at no role in this guild. Wrong or deleted; alerted.
+    """
+    configured = config.GAME_ROLES
+    buckets = classify_game_roles(
+        configured, games.live_ids(), set(games.labels)
+    )
+    syncing = buckets["syncing"]
+    staged = buckets["staged"]
+    no_row = buckets["no_row"]
+    unconfigured = buckets["unconfigured"]
+
+    bad_id: list[str] = []
+    for game_id, role_id in sorted(configured.items()):
+        if guild.get_role(role_id) is None:
+            bad_id.append(
+                f"`DISCORD_GAME_ROLE_{game_id.upper()}` ({role_id}) — no such role in the guild"
+            )
+
+    log.info(
+        "Game roles — syncing: %s | staged for launch: %s | no `games` row: %s",
+        ", ".join(syncing) or "none",
+        ", ".join(staged) or "none",
+        ", ".join(no_row) or "none",
+    )
+    if no_row:
+        # Not an error: staging a role ahead of the game is supported. But it is
+        # the one state a typo also produces, so it never scrolls past unlabelled.
+        log.info(
+            "Game roles for %s are configured but have no row in `games` — nothing "
+            "can be granted for them, since grants follow admin assignments and no "
+            "assignment can name a game that does not exist. Expected for an "
+            "announced game; check the spelling against `games.game_id` otherwise.",
+            ", ".join(no_row),
+        )
+    if unconfigured:
+        log.warning(
+            "Game roles — LIVE games with no DISCORD_GAME_ROLE_* var: %s. Their "
+            "admins will never be granted a game role.",
+            ", ".join(unconfigured),
+        )
+
+    if bad_id:
+        for problem in bad_id:
+            log.error("Game role config: %s", problem)
+        await log_to_discord(
+            "⚠️ **Game role problems at startup** — these IDs are wrong or deleted, so "
+            "those games' admins will never be granted their role:\n"
+            + "\n".join(f"• {problem}" for problem in bad_id)
+        )
+
+
 async def apply_resolve_tag(
     channel: discord.Thread,
     guild: discord.Guild,
