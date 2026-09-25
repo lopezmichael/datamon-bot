@@ -165,8 +165,20 @@ def _game_roles() -> dict[str, int]:
 # game_id → Discord role ID. Granted additively by role_sync, never removed.
 GAME_ROLES: dict[str, int] = _game_roles()
 
-# App base URL
+# App base URL. Since the P4 hub flip the apex is the game-neutral hub, and each game's
+# pages live on its own subdomain (`<game_id>.digilab.cards`), so a game-scoped link is
+# built from the game id rather than naming a game here.
 APP_BASE_URL = "https://digilab.cards"
+SITE_DOMAIN = "digilab.cards"
+
+
+def game_site_url(game: str | None) -> str:
+    """The site a game's pages live on; the hub when no game was named.
+
+    The hub forwards `/?scene=` links to the right game site, so a game-less link
+    still lands on the scene rather than on a generic front page.
+    """
+    return f"https://{game}.{SITE_DOMAIN}" if game else APP_BASE_URL
 
 # Logging
 logging.basicConfig(

@@ -360,7 +360,7 @@ class Commands(commands.Cog):
             title += f" ({self._game_label(game)})"
         embed = discord.Embed(
             title=title,
-            url=f"{config.APP_BASE_URL}/?scene={scene_row['slug']}",
+            url=f"{config.game_site_url(game)}/?scene={scene_row['slug']}",
             color=0xED4245,
         )
         embed.add_field(name="Location", value=location, inline=True)
