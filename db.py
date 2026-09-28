@@ -230,9 +230,16 @@ async def get_scene_by_slug(pool: asyncpg.Pool, slug: str) -> asyncpg.Record | N
 #     game. **The row's `role` is deliberately not consulted.** Adding
 #     `AND g.role IN (...)` would desync the two sides.
 #
-# It is also the authority for *who may resolve a request* (see
-# `get_admin_access_for_user`), so mention rights and resolve rights cannot drift
-# apart. The same shape is web's `hasPlatformAccess(ctx) && isGameAdmin(ctx, g)`.
+# It is the authority for *who may resolve a request* (see
+# `get_admin_access_for_user`) — the same shape as web's
+# `hasPlatformAccess(ctx) && isGameAdmin(ctx, g)` — and for the cascade's tier 3.
+#
+# It is NOT who gets paged, since 2026-09-28. Platform admins are game SMEs, not
+# triage: forum threads, nudges and the weekly digest's fallback all page
+# `get_super_admin_discord_ids` instead, and the digest swaps a tier-3 cascade
+# result for it. Mention rights and resolve rights diverge on purpose there: a
+# platform admin may still resolve their game's requests, they just aren't pinged
+# to. Do not "re-sync" the pages back through this predicate.
 def _global_admin_predicate(au: str, u: str, game: str) -> str:
     """SQL fragment for "is this admin global for `game`?".
 
