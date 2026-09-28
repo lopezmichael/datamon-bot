@@ -567,29 +567,27 @@ async def resolve_request(pool: asyncpg.Pool, thread_id: str, resolved_by: str) 
     return result == "UPDATE 1"
 
 
-async def get_global_admin_discord_ids(
-    pool: asyncpg.Pool, game_id: str | None = None
-) -> list[str]:
-    """Discord user IDs for the active global admins of ``game_id``.
+async def get_super_admin_discord_ids(pool: asyncpg.Pool) -> list[str]:
+    """Discord user IDs for the active super admins — who the forums page.
 
-    Same tier-3 membership test as ``get_admins_for_scene`` (shared, so the two can
-    never drift): super admins always, platform admins for the game they hold a role
-    in, plus the legacy grandfather arm.
+    #scene-requests, #bug-reports and #feature-requests belong to the super admins,
+    for every game. Platform admins are game SMEs (archetypes, general help), not
+    triage for these channels, so they are deliberately left out of every forum
+    ping and nudge — even though ``_global_admin_predicate`` still counts them as
+    global for resolving and for the scene cascade.
 
-    ``game_id=None`` means "any game" and is the pre-PR-4 behavior. Pass it only where
-    there is genuinely no game in hand — a manually created forum thread, which has no
-    request row at all. Scene-less *requests* do have a game; pass theirs.
+    Same two super-admin arms as the predicate (legacy ``admin_users.role`` or the
+    ``"user"`` flag), so the definition of "super admin" cannot drift.
     """
     rows = await _fetch(pool,
-        f"""
+        """
         SELECT DISTINCT au.discord_user_id
         FROM admin_users au
         LEFT JOIN "user" u ON u.legacy_admin_id = au.user_id
         WHERE au.is_active = TRUE
           AND au.discord_user_id IS NOT NULL
-          AND {_global_admin_predicate("au", "u", "$1")}
-        """,
-        game_id,
+          AND (au.role = 'super_admin' OR u.is_super_admin = TRUE)
+        """
     )
     return [r["discord_user_id"] for r in rows if r["discord_user_id"]]
 

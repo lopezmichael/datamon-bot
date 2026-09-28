@@ -184,6 +184,11 @@ class Digest(commands.Cog):
         for r in deactivated:
             scene_names.setdefault(r["scene_id"], r["scene_name"])
 
+        # A scene nobody owns locally falls through to the cascade's global tier, which
+        # counts platform admins. They are game SMEs, not scene triage, so that
+        # fallback pings the super admins instead — same owners as the forums.
+        super_admin_ids = await db.get_super_admin_discord_ids(self.bot.pool)
+
         mention_parts: dict[str, list[str]] = {}  # discord_user_id -> scene names
         for scene_id in set(scene_names.keys()):
             # Cascade scoped to this game, so a scene covered for Digimon but not for
@@ -191,11 +196,14 @@ class Digest(commands.Cog):
             admins = db.select_tier_admins(
                 await db.get_admins_for_scene(self.bot.pool, scene_id, game_id)
             )
+            if admins and admins[0]["tier"] == 3:
+                admin_ids = super_admin_ids
+            else:
+                admin_ids = [a["discord_user_id"] for a in admins]
             scene_name = scene_names.get(scene_id, "Unknown")
 
             seen: set[str] = set()
-            for a in admins:
-                did = a["discord_user_id"]
+            for did in admin_ids:
                 if did and did not in seen:
                     seen.add(did)
                     mention_parts.setdefault(did, [])
