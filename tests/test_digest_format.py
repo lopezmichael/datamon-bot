@@ -20,9 +20,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
-_config = types.ModuleType("config")
-_config.ADMIN_BASE_URL = "https://admin.example"
-sys.modules.setdefault("config", _config)
+sys.modules.setdefault("config", types.ModuleType("config"))
 
 from cogs.digest import (  # noqa: E402
     WINDOW_DAYS,
@@ -139,11 +137,20 @@ def test_missing_joined_at_does_not_crash() -> None:
 # --- rendering ---------------------------------------------------------------------
 
 
+def test_standing_keys_are_the_web_health_filters() -> None:
+    """Each count's `?health=` key must be one digilab-web's /admin/scenes accepts
+    (`SCENE_HEALTH_FILTERS` in src/lib/admin-scene-filters.ts). An unknown value is
+    ignored there, so a typo here would silently link to the unfiltered list."""
+    from cogs.digest import STANDING_LABELS
+    assert [k for k, _ in STANDING_LABELS] == ["never_played", "quiet", "no_admin"]
+
+
 STANDING = {"never_played": 23, "quiet": 34, "no_admin": 40}
+URL = "https://digimon.example/admin/scenes"
 
 
 def test_standing_alone_is_not_news() -> None:
-    assert format_game_section("Digimon", [], [], STANDING, {}) is None
+    assert format_game_section("Digimon", [], [], STANDING, {}, URL) is None
 
 
 def test_section_names_new_items_with_their_own_mentions() -> None:
@@ -153,7 +160,7 @@ def test_section_names_new_items_with_their_own_mentions() -> None:
     ]
     closures = [{"scene_id": 3, "name": "Andyseous Odyssey", "scene_name": "Austin"}]
     out = format_game_section(
-        "Digimon", items, closures, STANDING, {1: ["11"], 2: ["22", "33"], 3: ["44"]}
+        "Digimon", items, closures, STANDING, {1: ["11"], 2: ["22", "33"], 3: ["44"]}, URL
     )
     assert out == (
         "__**Digimon**__\n"
@@ -164,26 +171,33 @@ def test_section_names_new_items_with_their_own_mentions() -> None:
         "**Stores closed this week:**\n"
         "• **Andyseous Odyssey** (Austin) · <@44>\n"
         "\n"
-        "-# Standing: 23 never played · 34 quiet 60+ days · 40 without an admin "
-        "→ <https://admin.example/admin/scenes>"
+        "-# Standing: "
+        "[23 never played](<https://digimon.example/admin/scenes?health=never_played>) · "
+        "[34 quiet 60+ days](<https://digimon.example/admin/scenes?health=quiet>) · "
+        "[40 without an admin](<https://digimon.example/admin/scenes?health=no_admin>)"
     )
 
 
 def test_unmentioned_lines_and_zero_counts_are_omitted() -> None:
     items = [{"scene_id": 9, "display_name": "Osaka", "reasons": ["no admin assigned"]}]
-    out = format_game_section("Gundam", items, [], {"never_played": 0, "quiet": 5, "no_admin": 0}, {})
+    out = format_game_section(
+        "Gundam", items, [], {"never_played": 0, "quiet": 5, "no_admin": 0}, {},
+        "https://gundam.example/admin/scenes",
+    )
     assert out == (
         "__**Gundam**__\n"
         "**New this week:**\n"
         "• **Osaka** — no admin assigned\n"
         "\n"
-        "-# Standing: 5 quiet 60+ days → <https://admin.example/admin/scenes>"
+        "-# Standing: [5 quiet 60+ days](<https://gundam.example/admin/scenes?health=quiet>)"
     )
 
 
 def test_no_standing_line_when_there_is_no_backlog() -> None:
     closures = [{"scene_id": 3, "name": "Shop", "scene_name": "Austin"}]
-    out = format_game_section("Digimon", [], closures, {"never_played": 0, "quiet": 0, "no_admin": 0}, {})
+    out = format_game_section(
+        "Digimon", [], closures, {"never_played": 0, "quiet": 0, "no_admin": 0}, {}, URL
+    )
     assert out is not None and "Standing" not in out
 
 
