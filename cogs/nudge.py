@@ -188,41 +188,20 @@ class Nudge(commands.Cog):
         return None
 
     async def _get_mentions(self, thread: discord.Thread, channel_id: int) -> tuple[str, str]:
-        """Mentions for the relevant admins, and the game to label the nudge with.
+        """Mentions for the super admins, and the game to label the nudge with.
 
-        Returns the game's display name alongside the mentions so the reminder can
-        say which game it is about. The people pinged are already the right team —
-        the cascade is game-scoped — but the thread they are pinged back into sits
-        in a forum shared by every game. An empty label means a manual thread,
+        Every nudged channel is a forum the super admins own for every game (see
+        thread_watcher), so the people pinged do not depend on the thread. The game
+        label still does: the forums are shared by every game, and the reminder
+        should say which one it is about. An empty label means a manual thread,
         which genuinely has no game.
         """
-        # Check if this is an app-created thread with a scene
         request = await db.get_request_by_thread(self.bot.pool, str(thread.id))
         game_label = (
             self.bot.games.label(request["game_id"], default="") if request else ""
         )
 
-        if request and request["scene_id"]:
-            admins = db.select_tier_admins(
-                await db.get_admins_for_scene(
-                    self.bot.pool, request["scene_id"], request["game_id"]
-                )
-            )
-            parts = []
-            seen: set[str] = set()
-            for a in admins:
-                did = a["discord_user_id"]
-                if did and did not in seen:
-                    seen.add(did)
-                    parts.append(f"<@{did}>")
-            if parts:
-                return " ".join(parts), game_label
-
-        # Fallback: ping global admins — of the request's game when we have one, of
-        # every game for a manual thread with no request row.
-        admin_ids = await db.get_global_admin_discord_ids(
-            self.bot.pool, request["game_id"] if request else None
-        )
+        admin_ids = await db.get_super_admin_discord_ids(self.bot.pool)
         if admin_ids:
             return " ".join(f"<@{uid}>" for uid in admin_ids), game_label
 

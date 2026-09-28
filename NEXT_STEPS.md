@@ -103,9 +103,9 @@ without a live Discord server, so it is unverified until someone runs it.
 ### 8. Weekly Scene Health Digest
 
 1. Runs automatically on Mondays at 09:00 UTC
-2. **Expected:** Bot posts a webhook message to `#admin-digest` with sections for dormant scenes, unassigned scenes, and deactivated stores
-3. Follow-up message mentions relevant admins for each flagged scene
-4. If all scenes are healthy, no thread is created
+2. **Expected:** Bot posts a webhook message to `#admin-digest` with, per game, a **New this week** list (scenes that crossed a threshold this week), **Stores closed this week**, and a `-# Standing:` count line linking to the admin Scenes page
+3. Each named line carries its own mentions (scene → regional → super admins; never platform admins)
+4. If nothing crossed a threshold and no store closed, nothing is posted
 5. To test: temporarily change the weekday check in `cogs/digest.py`
 
 ### 9. Loop Failure Alerting (new 2026-08-10)
