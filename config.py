@@ -172,11 +172,6 @@ APP_BASE_URL = "https://digilab.cards"
 SITE_DOMAIN = "digilab.cards"
 
 
-# The admin UI lives on its own host, for every game (the game is picked in its
-# sidebar). Same base as digilab-web's `ADMIN_BASE` in `src/lib/admin-digest.ts`.
-ADMIN_BASE_URL = "https://admin.digilab.cards"
-
-
 def game_site_url(game: str | None) -> str:
     """The site a game's pages live on; the hub when no game was named.
 

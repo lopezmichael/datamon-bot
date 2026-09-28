@@ -49,8 +49,14 @@ QUIET_AFTER_DAYS = 60
 # Days on the game without a direct admin before that is worth a name.
 NO_ADMIN_AFTER_DAYS = 14
 
-# Where the standing backlog is worked. The admin UI picks the game in its sidebar.
-ADMIN_SCENES_URL = f"{config.ADMIN_BASE_URL}/admin/scenes"
+# Standing count key -> label. Each key is also the `?health=` value digilab-web's
+# /admin/scenes filters on (src/lib/admin-scene-filters.ts), with the same
+# thresholds, so a count here links to exactly the rows it counts.
+STANDING_LABELS = (
+    ("never_played", "never played"),
+    ("quiet", f"quiet {QUIET_AFTER_DAYS}+ days"),
+    ("no_admin", "without an admin"),
+)
 
 
 def _crossed(days: int, threshold: int) -> bool:
@@ -119,12 +125,16 @@ def format_game_section(
     closures: list,
     standing: dict[str, int],
     mentions: dict[int, list[str]],
+    scenes_url: str,
 ) -> str | None:
     """Render one game's block of the weekly digest, or None if nothing is new.
 
     Pure (no DB, no Discord), so it can be exercised without either (see tests/).
     `mentions` maps a scene id to the Discord ids answerable for it in THIS game,
     and each line carries its own, so a tagged admin sees which line is theirs.
+
+    `scenes_url` is the game's /admin/scenes. Each Standing count links to it
+    filtered (`?health=<key>`); the angle brackets suppress Discord's preview card.
 
     Standing counts alone never produce a section: they are context for what is
     new, not news. A game where nothing crossed a threshold and no store closed
@@ -152,19 +162,13 @@ def format_game_section(
         sections.append("**Stores closed this week:**\n" + "\n".join(lines))
 
     parts = [
-        f"{standing[key]} {label}"
-        for key, label in (
-            ("never_played", "never played"),
-            ("quiet", f"quiet {QUIET_AFTER_DAYS}+ days"),
-            ("no_admin", "without an admin"),
-        )
+        f"[{standing[key]} {label}](<{scenes_url}?health={key}>)"
+        for key, label in STANDING_LABELS
         if standing.get(key)
     ]
     if parts:
         # `-#` is Discord's subtext: present, but visibly not the point.
-        sections.append(
-            f"-# Standing: {' · '.join(parts)} → <{ADMIN_SCENES_URL}>"
-        )
+        sections.append(f"-# Standing: {' · '.join(parts)}")
 
     return f"__**{game_name}**__\n" + "\n\n".join(sections)
 
@@ -295,8 +299,13 @@ class Digest(commands.Cog):
             # dict.fromkeys: de-dupe, keep order (a row can repeat across tiers).
             mentions[scene_id] = list(dict.fromkeys(d for d in admin_ids if d))
 
+        # The game's own host: digilab-web 301s /admin/* from a game host to the
+        # admin host, query intact, and sets the admin game cookie on the way — so
+        # a Gundam link opens the Gundam list whichever game the admin last viewed.
+        scenes_url = f"{config.game_site_url(game_id)}/admin/scenes"
+
         return format_game_section(
-            game["short_name"] or game_id, items, closures, standing, mentions
+            game["short_name"] or game_id, items, closures, standing, mentions, scenes_url
         )
 
     @weekly_digest.before_loop
