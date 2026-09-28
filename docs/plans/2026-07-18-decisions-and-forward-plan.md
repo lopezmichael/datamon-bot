@@ -334,14 +334,23 @@ function).**
   `user.is_super_admin` / `user.is_platform_admin`, and the per-game half only asks whether a
   `game_admin_roles` row EXISTS — **the row's `role` is deliberately not consulted**.
 
+  **Amended 2026-09-28 — paging split from the predicate.** Platform admins are game SMEs
+  (archetypes, general help), not triage. Forum threads (`#scene-requests`, `#bug-reports`,
+  `#feature-requests`), stale nudges and the weekly digest's global fallback now page
+  **super admins only**, via `db.get_super_admin_discord_ids`; `get_global_admin_discord_ids`
+  was removed. The predicate still decides who may resolve and the cascade's tier 3, so
+  mention rights and resolve rights now diverge **on purpose**: a platform admin can resolve
+  their game's requests but is not pinged to. Web's daily digest still pages platform admins
+  at its tier 3 and needs the matching change in `digilab-web`.
+
   An earlier draft carried a grandfather arm for legacy-flagged platform admins holding no
   per-game row. **Removed**: checked against production, all three platform/super admins
   (Photon, AtomShell, Secret8znMan) hold digimon `game_admin_roles` rows with matching roles,
   so the arm covered nobody, and the web bind path seeds a per-game row for every new admin,
   so a legacy-only platform admin cannot newly appear. It was dead weight that made the two
   sides differ.
-- `db.get_global_admin_discord_ids(pool, game_id=None)` — same predicate. Scene-*less*
-  requests pass their own game; only a manual forum thread (no request row at all) passes None.
+- ~~`db.get_global_admin_discord_ids(pool, game_id=None)`~~ — removed 2026-09-28, replaced by
+  `db.get_super_admin_discord_ids(pool)` (see the amendment above).
 - `db.get_admin_access_for_user(pool, discord_user_id, game_id) -> AdminAccess` — `game_id`
   required. Returns an explicit **level** (`'none'` / `'global'` / `'scoped'`) plus the scoped
   assignment rows, and callers branch on the level via `access.covers(scene_id)`.
@@ -369,7 +378,9 @@ function).**
   `db.get_live_games` (was `get_games_with_scene_coverage`): games that have at least one active
   `scene_games` row for an active metro/online scene, ordered by scene count descending, so
   Digimon leads today without the bot knowing Digimon is special. Each section runs that
-  game's dormant scenes, unassigned scenes, deactivated stores and its own cascade mentions.
+  game's scene health and store closures with its own cascade mentions. (Since 2026-09-28 a
+  scene is named only the week it crosses a threshold, with the rest as Standing counts, and
+  closures come from `admin_audit_log` — see `cogs/digest.py`'s module docstring.)
   An empty game list **raises** rather than posting nothing: a per-game digest with no games
   renders as a silent healthy week, which is the failure shape that hid four broken card
   syncs. A single game's failure is caught per game and rendered as a visible failure line, so

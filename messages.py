@@ -72,7 +72,7 @@ _APP_MESSAGES: dict[str, dict[str, str]] = {
         "scene_request": (
             "\U0001f30d **New Scene Request{game} — Triage Needed**\n"
             "\n"
-            "Someone wants to bring DigiLab to a new area! Platform admins, please:\n"
+            "Someone wants to bring DigiLab to a new area! Admins, please:\n"
             "1. Check if this area overlaps with an existing scene\n"
             "2. Determine if there's enough local activity to warrant a new scene\n"
             "3. If approved, create the scene and assign an admin\n"
@@ -86,7 +86,7 @@ _APP_MESSAGES: dict[str, dict[str, str]] = {
         "bug_report": (
             "\U0001f41b **Bug Report{game} — Triage Needed**\n"
             "\n"
-            "A bug has been reported. Platform admins, please:\n"
+            "A bug has been reported. Admins, please:\n"
             "1. Try to reproduce using the context above\n"
             "2. Prioritize and track in our issue tracker if confirmed\n"
             "3. React ✅ on the first message when this has been addressed\n"
@@ -140,7 +140,7 @@ _MANUAL_MESSAGES: dict[str, str] = {
         "• Any stores or communities running events there\n"
         "• Your Discord handle so we can follow up\n"
         "\n"
-        "A platform admin has been notified and will review your request here.\n"
+        "An admin has been notified and will review your request here.\n"
         "\n"
         "**Looking to add a store to an existing scene?** Use the store request "
         "form on the DigiLab site instead — it goes straight to the admin queue, "
@@ -161,7 +161,7 @@ _MANUAL_MESSAGES: dict[str, str] = {
         "creates a tracked request — it's the fastest way to get a fix, and it "
         "records which game you were looking at so the right people see it.\n"
         "\n"
-        "A platform admin will triage this and follow up here."
+        "An admin will triage this and follow up here."
     ),
     "feature_requests": (
         "\U0001f44b **Thanks for the feature idea!**\n"
@@ -174,7 +174,7 @@ _MANUAL_MESSAGES: dict[str, str] = {
         "• How you'd expect it to work\n"
         "• How important this is relative to other things you'd like to see\n"
         "\n"
-        "Platform admins review feature requests regularly. "
+        "An admin has been notified and reviews feature requests regularly. "
         "Community discussion and upvotes (reactions) help us prioritize!"
     ),
 }

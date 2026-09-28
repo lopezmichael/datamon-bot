@@ -230,9 +230,16 @@ async def get_scene_by_slug(pool: asyncpg.Pool, slug: str) -> asyncpg.Record | N
 #     game. **The row's `role` is deliberately not consulted.** Adding
 #     `AND g.role IN (...)` would desync the two sides.
 #
-# It is also the authority for *who may resolve a request* (see
-# `get_admin_access_for_user`), so mention rights and resolve rights cannot drift
-# apart. The same shape is web's `hasPlatformAccess(ctx) && isGameAdmin(ctx, g)`.
+# It is the authority for *who may resolve a request* (see
+# `get_admin_access_for_user`) — the same shape as web's
+# `hasPlatformAccess(ctx) && isGameAdmin(ctx, g)` — and for the cascade's tier 3.
+#
+# It is NOT who gets paged, since 2026-09-28. Platform admins are game SMEs, not
+# triage: forum threads, nudges and the weekly digest's fallback all page
+# `get_super_admin_discord_ids` instead, and the digest swaps a tier-3 cascade
+# result for it. Mention rights and resolve rights diverge on purpose there: a
+# platform admin may still resolve their game's requests, they just aren't pinged
+# to. Do not "re-sync" the pages back through this predicate.
 def _global_admin_predicate(au: str, u: str, game: str) -> str:
     """SQL fragment for "is this admin global for `game`?".
 
@@ -567,29 +574,27 @@ async def resolve_request(pool: asyncpg.Pool, thread_id: str, resolved_by: str) 
     return result == "UPDATE 1"
 
 
-async def get_global_admin_discord_ids(
-    pool: asyncpg.Pool, game_id: str | None = None
-) -> list[str]:
-    """Discord user IDs for the active global admins of ``game_id``.
+async def get_super_admin_discord_ids(pool: asyncpg.Pool) -> list[str]:
+    """Discord user IDs for the active super admins — who the forums page.
 
-    Same tier-3 membership test as ``get_admins_for_scene`` (shared, so the two can
-    never drift): super admins always, platform admins for the game they hold a role
-    in, plus the legacy grandfather arm.
+    #scene-requests, #bug-reports and #feature-requests belong to the super admins,
+    for every game. Platform admins are game SMEs (archetypes, general help), not
+    triage for these channels, so they are deliberately left out of every forum
+    ping and nudge — even though ``_global_admin_predicate`` still counts them as
+    global for resolving and for the scene cascade.
 
-    ``game_id=None`` means "any game" and is the pre-PR-4 behavior. Pass it only where
-    there is genuinely no game in hand — a manually created forum thread, which has no
-    request row at all. Scene-less *requests* do have a game; pass theirs.
+    Same two super-admin arms as the predicate (legacy ``admin_users.role`` or the
+    ``"user"`` flag), so the definition of "super admin" cannot drift.
     """
     rows = await _fetch(pool,
-        f"""
+        """
         SELECT DISTINCT au.discord_user_id
         FROM admin_users au
         LEFT JOIN "user" u ON u.legacy_admin_id = au.user_id
         WHERE au.is_active = TRUE
           AND au.discord_user_id IS NOT NULL
-          AND {_global_admin_predicate("au", "u", "$1")}
-        """,
-        game_id,
+          AND (au.role = 'super_admin' OR u.is_super_admin = TRUE)
+        """
     )
     return [r["discord_user_id"] for r in rows if r["discord_user_id"]]
 
@@ -751,110 +756,91 @@ async def get_games_for_scene(pool: asyncpg.Pool, scene_id: int) -> list[asyncpg
     )
 
 
-async def get_dormant_scenes(
-    pool: asyncpg.Pool, game_id: str, days: int = 60
-) -> list[asyncpg.Record]:
-    """Scenes with no tournaments *of this game* in the last N days.
+async def get_scene_health(pool: asyncpg.Pool, game_id: str) -> list[asyncpg.Record]:
+    """Every active metro/online scene for this game, with what the digest judges it on.
+
+    One row per scene: ``joined_at`` (when the scene started running this game),
+    ``last_tournament`` (this game's only) and ``has_admin`` (a direct assignment
+    for this game). The digest classifies these in Python (``cogs.digest.
+    classify_scene_health``), because what makes a scene worth naming is not its
+    state but the WEEK it crossed a threshold — and that is a pure function of these
+    three columns and today's date, with nothing to remember between runs.
+
+    ``joined_at`` is ``scene_games.created_at``, falling back to ``scenes.created_at``
+    for a junction-less scene. Membership is orphan-tolerant, as it always was: a
+    scene with no ``scene_games`` rows at all is reported under every game rather
+    than dropped, because a misconfigured scene is what a health digest exists to
+    surface.
 
     Both halves are game-scoped: which scenes count (``scene_games``) and which
-    tournaments count (``tournaments.game_id``). Without the second one a scene whose
+    tournaments count (``tournaments.game_id``). Without the second, a scene whose
     only recent event was another game's reads as healthy for every game.
-
-    Membership is orphan-tolerant, like ``get_recently_deactivated_stores``: a scene
-    with no ``scene_games`` rows at all is reported under every game rather than
-    dropped. A junction-less scene is precisely the kind of misconfiguration a health
-    digest exists to surface, and hiding it is the worse failure. (Zero such scenes
-    today.)
     """
     return await _fetch(pool,
         """
         SELECT s.scene_id, s.display_name,
-               MAX(t.event_date) AS last_tournament
+               COALESCE(MIN(sg.created_at), s.created_at)::date AS joined_at,
+               (
+                   SELECT MAX(t.event_date) FROM tournaments t
+                   JOIN stores st ON st.store_id = t.store_id
+                   WHERE st.scene_id = s.scene_id AND t.game_id = $1::text
+               ) AS last_tournament,
+               EXISTS (
+                   SELECT 1 FROM admin_user_scenes aus
+                   JOIN admin_users au ON aus.user_id = au.user_id
+                   WHERE aus.scene_id = s.scene_id AND aus.game_id = $1::text
+                     AND au.is_active = TRUE
+               ) AS has_admin
         FROM scenes s
-        LEFT JOIN stores st ON st.scene_id = s.scene_id
-        LEFT JOIN tournaments t ON t.store_id = st.store_id AND t.game_id = $2::text
+        LEFT JOIN scene_games sg
+          ON sg.scene_id = s.scene_id AND sg.game_id = $1::text AND sg.is_active = TRUE
         WHERE s.scene_type IN ('metro', 'online') AND s.is_active = TRUE
           AND (
-              EXISTS (
-                  SELECT 1 FROM scene_games sg
-                  WHERE sg.scene_id = s.scene_id AND sg.game_id = $2::text
-                    AND sg.is_active = TRUE
-              )
+              sg.scene_id IS NOT NULL
               OR NOT EXISTS (
                   SELECT 1 FROM scene_games sg2 WHERE sg2.scene_id = s.scene_id
               )
           )
-        GROUP BY s.scene_id, s.display_name
-        HAVING MAX(t.event_date) IS NULL OR MAX(t.event_date) < CURRENT_DATE - $1 * INTERVAL '1 day'
-        ORDER BY MAX(t.event_date) NULLS FIRST
-        """,
-        days,
-        game_id,
-    )
-
-
-async def get_unassigned_scenes(pool: asyncpg.Pool, game_id: str) -> list[asyncpg.Record]:
-    """Scenes active for this game with no direct admin assignment *for this game*.
-
-    An admin assigned to a scene for Digimon does not cover it for Gundam, so the
-    ``admin_user_scenes`` probe carries the game too. Every assignment row is
-    'digimon' today, so a 'digimon' call returns exactly the pre-PR-4 list.
-
-    Membership is orphan-tolerant for the same reason as ``get_dormant_scenes``: a
-    scene with no ``scene_games`` rows is unassigned *and* unregistered, which is
-    more worth reporting, not less.
-    """
-    return await _fetch(pool,
-        """
-        SELECT s.scene_id, s.display_name
-        FROM scenes s
-        WHERE s.scene_type IN ('metro', 'online') AND s.is_active = TRUE
-          AND (
-              EXISTS (
-                  SELECT 1 FROM scene_games sg
-                  WHERE sg.scene_id = s.scene_id AND sg.game_id = $1::text
-                    AND sg.is_active = TRUE
-              )
-              OR NOT EXISTS (
-                  SELECT 1 FROM scene_games sg2 WHERE sg2.scene_id = s.scene_id
-              )
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM admin_user_scenes aus
-              JOIN admin_users au ON aus.user_id = au.user_id
-              WHERE aus.scene_id = s.scene_id AND aus.game_id = $1::text
-                AND au.is_active = TRUE
-          )
+        GROUP BY s.scene_id, s.display_name, s.created_at
         ORDER BY s.display_name
         """,
         game_id,
     )
 
 
-async def get_recently_deactivated_stores(
+async def get_store_closures(
     pool: asyncpg.Pool, game_id: str, days: int = 7
 ) -> list[asyncpg.Record]:
-    """Stores deactivated in the last N days, for the games they served.
+    """Stores an admin deactivated in the last N days, for the games they served.
 
-    ``stores.is_active`` is global (a closed shop is closed for everyone), so the
-    per-game filter is the ``store_games`` junction. A store carrying no junction
-    rows at all predates that junction and is reported under every game rather than
-    dropped — a duplicate line in a digest is recoverable, a store that silently
-    stops being reported is not.
+    Read from web's ``admin_audit_log``, the only record of WHEN a store closed.
+    The previous query keyed off ``stores.updated_at`` — which any later edit to an
+    inactive store bumps, re-reporting an old closure — and required an ACTIVE
+    ``store_games`` row, which web flips inactive in the same close. So a real
+    closure was invisible to it; only a junction-less store could ever appear.
+
+    Filters, each for a reason:
+    * the store must still be inactive — a close that was undone is not news;
+    * merges (``changes ? 'merged_into'``) are excluded — a duplicate folded into
+      its survivor is data cleanup, not a shop that closed;
+    * game membership is ANY ``store_games`` row for the game, active or not, since
+      the close deactivates them; a junction-less store is reported under every game.
     """
     return await _fetch(pool,
         """
-        SELECT st.store_id, st.name, st.city, st.state,
-               s.scene_id, s.display_name AS scene_name
-        FROM stores st
-        JOIN scenes s ON st.scene_id = s.scene_id
-        WHERE st.is_active = FALSE
-          AND st.updated_at >= CURRENT_DATE - $1 * INTERVAL '1 day'
+        SELECT DISTINCT st.store_id, st.name, s.scene_id, s.display_name AS scene_name
+        FROM admin_audit_log l
+        JOIN stores st ON st.store_id::text = l.entity_id
+        JOIN scenes s ON s.scene_id = st.scene_id
+        WHERE l.entity_type = 'store'
+          AND l.changes -> 'is_active' ->> 'new' = 'false'
+          AND NOT (l.changes ? 'merged_into')
+          AND l.created_at >= NOW() - $1 * INTERVAL '1 day'
+          AND st.is_active = FALSE
           AND (
               EXISTS (
                   SELECT 1 FROM store_games sg
                   WHERE sg.store_id = st.store_id AND sg.game_id = $2::text
-                    AND sg.is_active = TRUE
               )
               OR NOT EXISTS (
                   SELECT 1 FROM store_games sg2 WHERE sg2.store_id = st.store_id
