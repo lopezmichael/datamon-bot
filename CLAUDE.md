@@ -2,7 +2,7 @@
 
 Discord bot for DigiLab, a multi-game Bandai TCG tournament platform (Digimon and Gundam are live; One Piece, Fusion World and Union Arena exist as catalogue-only rows). Coordinates ~200 admins across 6 continents. Handles role sync, slash commands, forum thread automation, and request resolution tracking.
 
-**Companion repo:** `digilab-app` (the web app). This bot shares its Neon PostgreSQL database (read-only except for `admin_requests.status`).
+**Companion repo:** `digilab-web` (the web app). This bot shares its Neon PostgreSQL database (read-only except for `admin_requests.status`), as the `datamon_bot` role with column-level grants (see below).
 
 ## Quick Start
 
@@ -61,7 +61,8 @@ cogs/
   that it is blending them. A blended total under a game-branded header is how `/scene
   austin` came to report 168 tournaments for a scene with zero Digimon activity
 - **Never call `pool.fetch` / `fetchrow` / `execute` directly**, in `db.py` or anywhere else. Go through `_fetch` / `_fetchrow` / `_run`, which retry when Neon has dropped the pooled connection out from under us. Anything routed through `_run` must be safe to run more than once
-- Bot is **read-only** on the database except for `UPDATE admin_requests SET status='resolved'` — enforced at the DB level since 2026-07-29: the `datamon_bot` Postgres role has SELECT everywhere and column-level UPDATE on `admin_requests(status, resolved_at, resolved_by)` only
+- Bot is **read-only** on the database except for `UPDATE admin_requests SET status='resolved'`, enforced at the DB level. Since 2026-11-04 the `datamon_bot` role can SELECT **only the columns `db.py` reads** (14 tables), plus column-level UPDATE on `admin_requests(status, resolved_at, resolved_by)`. It has no table-level SELECT and no default privileges, and it cannot read the secret columns (`admin_users.password_hash`, `user_webhooks.url`, `api_keys.key_hash`, `team_invite_links.code`) or the auth tables (`session`, `account`, `verification`).
+  **A query that reads a new column or table fails with `permission denied` until it is granted.** Before shipping one, add the `GRANT SELECT (col, ...) ON <table> TO datamon_bot` in a digilab-web migration and in the ROLE GRANTS block of both schema files there (`docs/references/schema.sql`, `db/schema.sql`), and get it applied to production. The grant set and why: digilab-web `db/migrations/2026-11-04-non-app-roles-no-secret-columns.sql`. digilab-web's `conventions.test.ts` refuses table-level or `ON ALL TABLES` grants to this role, and any write beyond that one UPDATE.
 - Periodic loops report failures via `utils.LoopFailureAlerter`, not a hand-rolled flag. Construct it with a threshold matched to the loop's cadence: >1 for the 5-minute loops so a single blip stays quiet, 1 for hourly-and-slower where the next data point is far away
 - Slash commands that query the DB must `defer()` before the first query — Discord rejects a first response after 3 seconds, and a Neon cold start can exceed that. `defer()` fixes the reply's visibility for the whole interaction, so it is only straightforward where every path shares one ephemerality
 - Discord rate limits: role_sync adds 1-second delays between role changes
