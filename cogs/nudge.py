@@ -53,14 +53,16 @@ class Nudge(commands.Cog):
         self._alerter = LoopFailureAlerter("Stale nudge loop")
 
     async def cog_load(self) -> None:
-        self.nudge_stale.start()
+        # 24-hour loop, plus slack for a long run.
+        self.bot.watchdog.watch(self.nudge_stale, self._alerter, stale_after=30 * 3600)
 
     async def cog_unload(self) -> None:
-        self.nudge_stale.cancel()
+        self.bot.watchdog.unwatch(self.nudge_stale)
 
     @tasks.loop(hours=24)
     async def nudge_stale(self) -> None:
-        # An exception escaping the loop body kills the loop permanently
+        # An exception escaping the loop body kills the loop (the watchdog
+        # restarts it, but a handled failure is the one that carries context)
         try:
             await self._run_nudge()
         except TRANSIENT_LOOP_EXCEPTIONS:

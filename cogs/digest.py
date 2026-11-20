@@ -181,10 +181,11 @@ class Digest(commands.Cog):
         self._alerter = LoopFailureAlerter("Weekly digest loop")
 
     async def cog_load(self) -> None:
-        self.weekly_digest.start()
+        # ticks daily at DIGEST_TIME (only Monday does work).
+        self.bot.watchdog.watch(self.weekly_digest, self._alerter, stale_after=30 * 3600)
 
     async def cog_unload(self) -> None:
-        self.weekly_digest.cancel()
+        self.bot.watchdog.unwatch(self.weekly_digest)
 
     @tasks.loop(time=DIGEST_TIME)
     async def weekly_digest(self) -> None:
@@ -193,16 +194,23 @@ class Digest(commands.Cog):
         # non-Monday tick reached `recovered()` and posted "the digest recovered"
         # the morning after a Monday failure, having done nothing at all.
         if discord.utils.utcnow().weekday() != 0:
+            # A heartbeat, not a verdict (beat() never announces recovery): the
+            # watchdog needs the daily tick to tell an idle digest from a dead one.
+            self._alerter.beat()
             return
 
-        # An exception escaping the loop body kills the loop permanently
+        # An exception escaping the loop body kills the loop (the watchdog
+        # restarts it, but a handled failure is the one that carries context)
+        #
+        # Transient errors are NOT re-raised here, unlike the relative loops. On
+        # a `time=` loop discord.ext.tasks retries at the next SCHEDULED time,
+        # not after a backoff: it advances `_next_iteration` before running the
+        # body and sleeps until it at the top of every pass, failed or not. So a
+        # re-raised DB blip on Monday was "retried" on Tuesday, where the weekday
+        # gate returns — the digest never sent, and nothing said so. Every
+        # failure goes to the alerter instead, which posts on the first one.
         try:
             await self._run_digest()
-        except TRANSIENT_LOOP_EXCEPTIONS:
-            # Let discord.ext.tasks retry these with its own backoff. Everything
-            # that can raise these runs before the webhook post (which swallows
-            # its own errors), so a retry can never double-post.
-            raise
         except Exception as exc:
             log.exception("Weekly digest run failed")
             await self._alerter.failed(exc)
@@ -224,8 +232,7 @@ class Digest(commands.Cog):
                 "No active games with scene coverage: cannot build the weekly digest"
             )
 
-        # All DB work happens before the post, so a transient failure retried by the
-        # loop can never double-post.
+        # All DB work happens before the post, so a failed run never half-posts.
         #
         # Per game, not per run: one game's bad query (a dropped column, a permission
         # gap on a table only it touches) used to cost the whole digest, including the
@@ -239,7 +246,9 @@ class Digest(commands.Cog):
             try:
                 section = await self._game_section(game)
             except TRANSIENT_LOOP_EXCEPTIONS:
-                # Network-class: let the loop's own backoff retry the whole run.
+                # Network-class: not one game's breakage, so fail the whole run
+                # and let the alerter say so (see weekly_digest on why there is
+                # no retry).
                 raise
             except Exception as exc:
                 log.exception("Digest section failed for game %s", game["game_id"])

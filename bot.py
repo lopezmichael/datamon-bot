@@ -9,7 +9,7 @@ from discord.ext import commands
 import config
 import db
 from games import GameCache
-from utils import check_forum_config, check_game_roles
+from utils import LoopWatchdog, check_forum_config, check_game_roles
 
 log = logging.getLogger(__name__)
 
@@ -25,9 +25,13 @@ class DatamonBot(commands.Bot):
         # Shared across cogs — see games.py. Created here rather than in the
         # commands cog so a cog that loads first can still read it.
         self.games = GameCache()
+        # Every cog's periodic loop is started through this, so a loop that dies
+        # or hangs reaches #bot-log instead of going quiet (see LoopWatchdog).
+        self.watchdog = LoopWatchdog()
 
     async def setup_hook(self) -> None:
         self.pool = await db.create_pool()
+        self.watchdog.start()
         # Warm the cache the bot owns, before any cog loads.
         #
         # NOT because a gateway event could beat it — setup_hook runs before the
@@ -93,6 +97,7 @@ class DatamonBot(commands.Bot):
                 )
 
     async def close(self) -> None:
+        self.watchdog.stop()
         if hasattr(self, "pool") and self.pool:
             await self.pool.close()
             log.info("Database pool closed")
