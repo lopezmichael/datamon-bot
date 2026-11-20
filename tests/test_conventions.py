@@ -197,19 +197,21 @@ def test_no_direct_pool_calls() -> None:
 # `LoopWatchdog` reports both, but only for loops it was handed. A new loop
 # started with a bare `.start()` would reproduce the incident exactly, and read
 # as fine in review. So: every `@tasks.loop` method in a cog must be passed to
-# `watchdog.watch(self.<name>, ...)` in the same file, and none may be started
-# directly.
+# `watchdog.watch(self.<name>, ...)` and to `watchdog.unwatch(self.<name>)` in
+# the same file, and none may be started directly. (A loop cancelled behind the
+# watchdog's back would be reported as dead and restarted after its cog unloaded.)
 #
 # Mutation-verified: changing role_sync's cog_load back to
 # `self.sync_roles.start()` fails BOTH halves (unwatched, and started directly);
-# adding a second `@tasks.loop` to a cog without a `watch()` call fails the
-# first; and deleting the `tasks.loop` decorator matching makes the
-# found-at-least-five floor fail, so the check cannot pass by seeing nothing.
+# changing its cog_unload back to `self.sync_roles.cancel()` fails the unwatch
+# half; adding a second `@tasks.loop` to a cog with neither call fails; and
+# deleting the `tasks.loop` decorator matching makes the found-at-least-five
+# floor fail, so the check cannot pass by seeing nothing.
 
 def _task_loops_and_starts(path: Path):
-    """(loop method names, names passed to *.watch(self.X), names .start()ed)."""
+    """(loop names, names passed to *.watch(self.X), to *.unwatch(self.X), names .start()ed)."""
     tree = ast.parse(io.open(path, encoding="utf-8").read())
-    loops, watched, started = set(), set(), []
+    loops, watched, unwatched, started = set(), set(), set(), []
 
     def self_attr(node):
         if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
@@ -225,25 +227,27 @@ def _task_loops_and_starts(path: Path):
                         and isinstance(target.value, ast.Name) and target.value.id == "tasks"):
                     loops.add(node.name)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr == "watch" and node.args:
+            if node.func.attr in ("watch", "unwatch") and node.args:
                 name = self_attr(node.args[0])
                 if name:
-                    watched.add(name)
+                    (watched if node.func.attr == "watch" else unwatched).add(name)
             if node.func.attr in ("start", "restart"):
                 name = self_attr(node.func.value)
                 if name:
                     started.append((node.lineno, name))
-    return loops, watched, started
+    return loops, watched, unwatched, started
 
 
 def test_every_task_loop_is_started_through_the_watchdog() -> None:
     offenders: list[str] = []
     total = 0
     for path in sorted((REPO_ROOT / "cogs").glob("*.py")):
-        loops, watched, started = _task_loops_and_starts(path)
+        loops, watched, unwatched, started = _task_loops_and_starts(path)
         total += len(loops)
         for name in sorted(loops - watched):
             offenders.append(f"{_rel(path)}: loop `{name}` is never passed to watchdog.watch()")
+        for name in sorted(loops - unwatched):
+            offenders.append(f"{_rel(path)}: loop `{name}` is never passed to watchdog.unwatch()")
         for lineno, name in started:
             if name in loops:
                 offenders.append(f"{_rel(path)}:{lineno}: `self.{name}` started directly")

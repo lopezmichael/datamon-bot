@@ -37,7 +37,6 @@ from utils import (  # noqa: E402
     TRANSIENT_LOOP_EXCEPTIONS,
     describe_exit,
     format_duration,
-    is_stale,
     restart_delay,
     run_bounded,
 )
@@ -73,19 +72,6 @@ def test_restart_delay_is_immediate_then_backs_off_to_an_hour() -> None:
     assert [restart_delay(n) for n in (2, 3, 4, 5)] == [60, 120, 240, 480]
     assert restart_delay(8) == 3600
     assert restart_delay(50) == 3600, "the cap must hold, not overflow into days"
-
-
-def test_is_stale_measures_from_the_later_of_last_run_and_start() -> None:
-    # Never completed, but only just started: not stale.
-    assert not is_stale(None, since=1000, now=1000 + 60, stale_after=1200)
-    # Never completed, started long ago: stale.
-    assert is_stale(None, since=1000, now=1000 + 1201, stale_after=1200)
-    # Completed recently: not stale.
-    assert not is_stale(5000, since=1000, now=5000 + 600, stale_after=1200)
-    # Completed long ago: stale.
-    assert is_stale(5000, since=1000, now=5000 + 1300, stale_after=1200)
-    # A restart after the last completion resets the clock.
-    assert not is_stale(1000, since=9000, now=9000 + 60, stale_after=1200)
 
 
 def test_alerter_stamps_a_heartbeat_on_every_completed_run() -> None:
@@ -192,8 +178,17 @@ class _Cog:
         pass
 
 
-async def _settle() -> None:
-    await asyncio.sleep(0.05)
+async def _until(predicate, timeout: float = 2.0) -> None:
+    """Poll until `predicate()` holds; fail rather than hang if it never does.
+
+    Polling, not a fixed sleep, so a slow CI runner waits longer instead of
+    asserting against a loop that has not got round to dying yet.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError("condition not reached within the timeout")
+        await asyncio.sleep(0.005)
 
 
 def test_describe_exit_names_each_way_a_task_ends() -> None:
@@ -225,19 +220,17 @@ def test_a_loop_killed_by_an_exception_is_reported_and_restarted() -> None:
         cog = _Cog("raise")
         dog = LoopWatchdog()
         dog.watch(cog.lp, cog.alerter, stale_after=600)
-        await _settle()
-        assert not cog.lp.is_running(), "precondition: discord.ext.tasks stopped the loop"
+        await _until(lambda: not cog.lp.is_running())  # discord.ext.tasks stopped it
 
         cog.mode = "ok"
         await dog.check(now=0)
         assert len(POSTED) == 1 and "ValueError: boom" in POSTED[0] and "Test loop" in POSTED[0]
         assert cog.lp.is_running(), "first death restarts immediately"
 
-        await _settle()
+        await _until(lambda: cog.alerter.last_completed is not None)
         await dog.check(now=1)
-        assert "running again" in POSTED[-1], POSTED
+        assert "ticking again" in POSTED[-1], POSTED
         dog.unwatch(cog.lp)
-        await _settle()
 
     asyncio.run(go())
 
@@ -249,8 +242,7 @@ def test_a_stray_cancelled_error_is_caught_although_dot_error_never_fires() -> N
         cog = _Cog("cancel")
         dog = LoopWatchdog()
         dog.watch(cog.lp, cog.alerter, stale_after=600)
-        await _settle()
-        assert not cog.lp.is_running()
+        await _until(lambda: not cog.lp.is_running())
         assert not cog.lp.failed(), "the library does not even mark this as failed"
 
         cog.mode = "ok"
@@ -258,7 +250,6 @@ def test_a_stray_cancelled_error_is_caught_although_dot_error_never_fires() -> N
         assert len(POSTED) == 1 and "CancelledError" in POSTED[0]
         assert cog.lp.is_running()
         dog.unwatch(cog.lp)
-        await _settle()
 
     asyncio.run(go())
 
@@ -272,8 +263,7 @@ def test_a_crash_loop_backs_off_and_posts_once_more_only() -> None:
         dog.watch(cog.lp, cog.alerter, stale_after=600)
         now = 0.0
         for death in range(1, 6):
-            await _settle()
-            assert not cog.lp.is_running()
+            await _until(lambda: not cog.lp.is_running())
             await dog.check(now=now)
             if death == 1:
                 assert cog.lp.is_running(), "first restart is immediate"
@@ -289,7 +279,6 @@ def test_a_crash_loop_backs_off_and_posts_once_more_only() -> None:
         assert len(deaths_posted) == 2, deaths_posted
         assert f"died {CRASH_LOOP_ALERT_AT} times" in deaths_posted[1]
         dog.unwatch(cog.lp)
-        await _settle()
 
     asyncio.run(go())
 
@@ -301,7 +290,7 @@ def test_a_hung_loop_is_reported_once_and_its_recovery_announced() -> None:
         cog = _Cog("hang")
         dog = LoopWatchdog()
         dog.watch(cog.lp, cog.alerter, stale_after=600)
-        await _settle()
+        await _until(lambda: cog.runs == 1)
         assert cog.lp.is_running(), "a hung loop looks alive"
         since = dog._watched[id(cog.lp)].since
 
@@ -314,10 +303,9 @@ def test_a_hung_loop_is_reported_once_and_its_recovery_announced() -> None:
 
         cog.alerter.beat()
         await dog.check(now=cog.alerter.last_completed + 1)
-        assert "completed a run again" in POSTED[-1]
+        assert "ticking again" in POSTED[-1]
         assert cog.lp.is_running(), "stale loops are not restarted"
         dog.unwatch(cog.lp)
-        await _settle()
 
     asyncio.run(go())
 
@@ -329,12 +317,66 @@ def test_unwatch_stops_the_loop_without_a_death_alert() -> None:
         cog = _Cog("ok")
         dog = LoopWatchdog()
         dog.watch(cog.lp, cog.alerter, stale_after=600)
-        await _settle()
+        await _until(lambda: cog.runs >= 1)
         dog.unwatch(cog.lp)
-        await _settle()
-        assert not cog.lp.is_running()
+        await _until(lambda: not cog.lp.is_running())
         await dog.check(now=10_000)
         assert POSTED == []
+
+    asyncio.run(go())
+
+
+def test_a_loop_unwatched_mid_check_is_not_restarted() -> None:
+    """check() awaits a post between loops; a cog unloaded meanwhile stays down."""
+    _reset()
+
+    async def go():
+        first, second = _Cog("raise"), _Cog("raise")
+        dog = LoopWatchdog()
+        dog.watch(first.lp, first.alerter, stale_after=600)
+        dog.watch(second.lp, second.alerter, stale_after=600)
+        await _until(lambda: not first.lp.is_running() and not second.lp.is_running())
+
+        async def unload_second_while_posting(message):
+            POSTED.append(message)
+            dog._watched.pop(id(second.lp), None)  # what unwatch() does to the registry
+
+        utils.log_to_discord = unload_second_while_posting
+        try:
+            first.mode = second.mode = "ok"
+            await dog.check(now=0)
+        finally:
+            utils.log_to_discord = _capture
+        assert first.lp.is_running(), "the still-watched loop is restarted"
+        assert not second.lp.is_running(), "the unwatched one must not be"
+        assert len(POSTED) == 1, POSTED
+        dog.unwatch(first.lp)
+
+    asyncio.run(go())
+
+
+def test_a_loop_unwatched_during_its_own_death_alert_is_not_restarted() -> None:
+    """The restart in _handle_dead follows the death post, which awaits."""
+    _reset()
+
+    async def go():
+        cog = _Cog("raise")
+        dog = LoopWatchdog()
+        dog.watch(cog.lp, cog.alerter, stale_after=600)
+        await _until(lambda: not cog.lp.is_running())
+
+        async def unload_while_posting(message):
+            POSTED.append(message)
+            dog._watched.pop(id(cog.lp), None)
+
+        utils.log_to_discord = unload_while_posting
+        try:
+            cog.mode = "ok"
+            await dog.check(now=0)
+        finally:
+            utils.log_to_discord = _capture
+        assert len(POSTED) == 1 and "stopped" in POSTED[0]
+        assert not cog.lp.is_running(), "an unloaded cog's loop must stay down"
 
     asyncio.run(go())
 
@@ -366,8 +408,8 @@ def test_the_watchdog_survives_its_own_failures_and_stops_only_on_stop() -> None
 
         task = dog._task
         dog.stop()
-        await asyncio.sleep(0.02)
-        assert task.cancelled() and dog._task is task, "stop() must not trigger a self-restart"
+        await _until(task.done)
+        assert task.cancelled(), "a requested cancel is the one way it ends"
 
     try:
         asyncio.run(go())
@@ -375,35 +417,35 @@ def test_the_watchdog_survives_its_own_failures_and_stops_only_on_stop() -> None
         utils.WATCHDOG_CHECK_SECONDS = original
 
 
-def test_the_watchdog_restarts_itself_if_its_task_ends() -> None:
+def test_a_transient_monday_digest_failure_is_reported_not_deferred_to_tuesday() -> None:
+    """The digest is a `time=` loop: a re-raised transient error would be retried
+    at the NEXT scheduled tick (Tuesday), where the weekday gate skips it. So it
+    must reach the alerter, and the idle Tuesday tick must not claim recovery."""
+    import datetime
+    import discord
+    import cogs.digest as digest
+
     _reset()
-    original = utils.WATCHDOG_CHECK_SECONDS
-    utils.WATCHDOG_CHECK_SECONDS = 0.005
+    cog = digest.Digest(types.SimpleNamespace())
 
-    async def go():
-        dog = LoopWatchdog()
+    async def blip():
+        raise OSError("connection reset")  # one of TRANSIENT_LOOP_EXCEPTIONS
 
-        async def dies():
-            # _run is `while True`; ending at all is the bug this guards.
-            return None
-
-        first_run = dog._run
-        dog._run = dies
-        dog.start()
-        first = dog._task
-        await asyncio.sleep(0.02)
-        dog._run = first_run
-        # The done-callback restarted it with the real _run.
-        assert first.done() and dog._task is not first and not dog._task.done()
-        await asyncio.sleep(0.02)
-        assert any("ended unexpectedly" in m for m in POSTED), POSTED
-        dog.stop()
-        await asyncio.sleep(0.01)
-
+    cog._run_digest = blip
+    real_utcnow = discord.utils.utcnow
     try:
-        asyncio.run(go())
+        discord.utils.utcnow = lambda: datetime.datetime(2026, 11, 16, 9, tzinfo=datetime.timezone.utc)
+        try:
+            asyncio.run(cog.weekly_digest.coro(cog))  # Monday
+        except OSError:
+            raise AssertionError("re-raised to discord.ext.tasks: retried Tuesday, gated out, never sent")
+        assert len(POSTED) == 1 and "OSError" in POSTED[0], POSTED
+
+        discord.utils.utcnow = lambda: datetime.datetime(2026, 11, 17, 9, tzinfo=datetime.timezone.utc)
+        asyncio.run(cog.weekly_digest.coro(cog))  # Tuesday: a beat, not a verdict
+        assert len(POSTED) == 1, "an idle Tuesday tick must not announce recovery"
     finally:
-        utils.WATCHDOG_CHECK_SECONDS = original
+        discord.utils.utcnow = real_utcnow
 
 
 if __name__ == "__main__":

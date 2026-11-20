@@ -66,24 +66,38 @@ def _chunk_message(message: str, limit: int = MAX_LOG_CHARS) -> list[str]:
     return chunks
 
 
-async def post_webhook(url: str, message: str, username: str = "Datamon Bot") -> None:
+async def post_webhook(
+    url: str,
+    message: str,
+    username: str = "Datamon Bot",
+    allowed_mentions: discord.AllowedMentions | None = None,
+) -> None:
     """POST a message to a Discord webhook. Fire-and-forget.
 
     Messages over the webhook size limit are split across several posts, sent
-    in order over one session.
+    in order over one session. `allowed_mentions=None` keeps the library default
+    (mentions ping), which the weekly digest relies on to tag scene admins.
     """
+    send_kwargs = {"allowed_mentions": allowed_mentions} if allowed_mentions else {}
     try:
         async with aiohttp.ClientSession() as session:
             webhook = discord.Webhook.from_url(url, session=session)
             for chunk in _chunk_message(message):
-                await webhook.send(chunk, username=username)
+                await webhook.send(chunk, username=username, **send_kwargs)
     except Exception:
         log.exception("Failed to post to webhook")
 
 
 async def log_to_discord(message: str) -> None:
-    """Post a message to #bot-log via webhook. Fire-and-forget."""
-    await post_webhook(config.WEBHOOK_BOT_LOG, message)
+    """Post a message to #bot-log via webhook. Fire-and-forget.
+
+    #bot-log is read, not pinged: with no mentions allowed, a `member.mention`
+    (role sync's change lines) still renders as a name but notifies nobody, and
+    no user-controlled name can smuggle an @everyone through.
+    """
+    await post_webhook(
+        config.WEBHOOK_BOT_LOG, message, allowed_mentions=discord.AllowedMentions.none()
+    )
 
 
 # How much of an exception's text to carry into an alert. Enough for a Postgres
@@ -270,22 +284,10 @@ def restart_delay(deaths: int) -> float:
     return float(min(RESTART_BACKOFF_BASE_SECONDS * 2 ** (deaths - 2), RESTART_BACKOFF_CAP_SECONDS))
 
 
-def is_stale(last_completed: float | None, since: float, now: float, stale_after: float) -> bool:
-    """True when nothing has completed for longer than `stale_after`.
-
-    Measured from the later of the last completed run and `since` (when the
-    loop was last started), so a loop is not stale merely for being new.
-    """
-    reference = max(last_completed or since, since)
-    return now - reference > stale_after
-
-
 def describe_exit(task: asyncio.Task | None) -> str:
     """Why a loop's task is no longer running, for the death alert."""
     if task is None:
         return "never started"
-    if not task.done():
-        return "still running"
     if task.cancelled():
         # discord.ext.tasks treats any CancelledError as a shutdown: it stops the
         # loop WITHOUT calling the `.error` handler, so this is the death no
@@ -327,31 +329,35 @@ class LoopWatchdog:
     So the watchdog judges from outside, every minute: a watched loop whose task
     has ended is DEAD (alert with the exit reason, restart with backoff); one
     whose `LoopFailureAlerter` heartbeat is older than `stale_after` is STALE
-    (alert once, announce when it completes again). Stale loops are not
-    restarted: cancelling mid-run is not safe for every body, and role_sync, the
-    one where it is, bounds its own runs with `run_bounded` instead.
+    (alert once, announce when it ticks again). Stale loops are not restarted:
+    cancelling mid-run is not safe for every body, and role_sync, the one where
+    it is, bounds its own runs with `run_bounded` instead.
+
+    Its own recovery lines speak to LIVENESS only ("ticking again"), never to
+    whether a run succeeded: a tick can be a deliberate no-op (the digest on a
+    Tuesday), so success is the loop's own alerter's to announce.
 
     The watchdog is a plain task, not a `tasks.loop`, so it is not subject to
-    the failure modes above: it absorbs stray cancellations, alerts if its own
-    check keeps failing, and restarts itself from a done-callback if it ever
-    ends without `stop()`.
+    the failure modes above: it absorbs stray cancellations and Exceptions and
+    alerts if its own check keeps failing. Its task therefore ends only on a
+    requested cancel (`stop()`, shutdown) or a BaseException that is taking the
+    process down with it.
     """
 
     def __init__(self) -> None:
         self._watched: dict[int, _Watched] = {}
         self._task: asyncio.Task | None = None
-        self._stopping = False
         self._check_alerter = LoopFailureAlerter("Loop watchdog", threshold=3)
-        self._death_post: asyncio.Task | None = None
 
     # -- registration --------------------------------------------------------
 
     def watch(self, loop: tasks.Loop, alerter: LoopFailureAlerter, stale_after: float) -> None:
         """Start `loop` and keep watching it. `stale_after` is in seconds.
 
-        Call this in place of `loop.start()` (enforced by test_conventions).
-        Pick `stale_after` at a few times the loop's real period, so one slow
-        run is not news but a stopped one is.
+        Call this in place of `loop.start()`, and `unwatch` in place of
+        `loop.cancel()` (both enforced by test_conventions). Pick `stale_after`
+        at a few times the loop's real period, so one slow run is not news but
+        a stopped one is.
         """
         self._watched[id(loop)] = _Watched(loop, alerter, stale_after, since=time.monotonic())
         loop.start()
@@ -361,38 +367,48 @@ class LoopWatchdog:
         self._watched.pop(id(loop), None)
         loop.cancel()
 
+    def _still_watched(self, w: _Watched) -> bool:
+        # `check` awaits between entries; a cog unloaded meanwhile must not have
+        # its loop alerted on or, worse, restarted.
+        return self._watched.get(id(w.loop)) is w
+
     # -- the check -----------------------------------------------------------
 
     async def check(self, now: float) -> None:
         """One pass over every watched loop. `now` is a time.monotonic() value."""
         for w in list(self._watched.values()):
+            if not self._still_watched(w):
+                continue
             label = w.alerter.label
             if not w.loop.is_running():
                 await self._handle_dead(w, label, now)
                 continue
+            # Running again, by our restart or anyone's: no restart is pending.
+            w.restart_at = None
 
             if w.deaths and w.alerter.last_completed is not None and w.alerter.last_completed > w.since:
                 await log_to_discord(
-                    f"✅ **{label}** is running again — completed a run after "
+                    f"✅ **{label}** is ticking again after "
                     f"{w.deaths} restart{'s' if w.deaths != 1 else ''}."
                 )
                 w.deaths = 0
 
-            stale = is_stale(w.alerter.last_completed, w.since, now, w.stale_after)
+            # Measured from the later of the last completed run and the last
+            # (re)start, so a loop is not stale merely for being new.
+            age = now - max(w.alerter.last_completed or w.since, w.since)
+            stale = age > w.stale_after
             if stale and not w.stale_alerted:
                 w.stale_alerted = True
-                reference = max(w.alerter.last_completed or w.since, w.since)
-                log.error("%s has not completed a run in %.0fs", label, now - reference)
+                log.error("%s has not completed a run in %.0fs", label, age)
                 await log_to_discord(
-                    f"⏳ **{label}** has not completed a run in "
-                    f"{format_duration(now - reference)} (expected within "
-                    f"{format_duration(w.stale_after)}). It is either hung on an await or "
-                    "stuck retrying a transient error — `railway logs` will show which. "
-                    "Not restarted automatically."
+                    f"⏳ **{label}** has not completed a run in {format_duration(age)} "
+                    f"(expected within {format_duration(w.stale_after)}). It is either "
+                    "hung on an await or stuck retrying a transient error — `railway "
+                    "logs` will show which. Not restarted automatically."
                 )
             elif not stale and w.stale_alerted:
                 w.stale_alerted = False
-                await log_to_discord(f"✅ **{label}** completed a run again.")
+                await log_to_discord(f"✅ **{label}** is ticking again.")
 
     async def _handle_dead(self, w: _Watched, label: str, now: float) -> None:
         if w.restart_at is None:
@@ -414,10 +430,10 @@ class LoopWatchdog:
                     f"💀 **{label}** has died {w.deaths} times in a row (latest: "
                     f"`{reason}`). Restarting with backoff up to "
                     f"{format_duration(RESTART_BACKOFF_CAP_SECONDS)}; silent until it "
-                    "completes a run."
+                    "ticks again."
                 )
 
-        if now >= w.restart_at:
+        if now >= w.restart_at and self._still_watched(w):
             w.restart_at = None
             w.since = now
             try:
@@ -429,12 +445,9 @@ class LoopWatchdog:
     # -- the watchdog's own lifecycle ---------------------------------------
 
     def start(self) -> None:
-        self._stopping = False
         self._task = asyncio.create_task(self._run(), name="datamon-loop-watchdog")
-        self._task.add_done_callback(self._on_done)
 
     def stop(self) -> None:
-        self._stopping = True
         if self._task:
             self._task.cancel()
 
@@ -443,7 +456,6 @@ class LoopWatchdog:
             try:
                 await self.check(time.monotonic())
                 await self._check_alerter.recovered()
-                await asyncio.sleep(WATCHDOG_CHECK_SECONDS)
             except asyncio.CancelledError:
                 # A real cancel (stop(), interpreter shutdown) is a request on
                 # THIS task. Anything else is a stray from something we awaited,
@@ -451,22 +463,10 @@ class LoopWatchdog:
                 if asyncio.current_task().cancelling():
                     raise
                 log.error("Loop watchdog absorbed a stray CancelledError")
-                await asyncio.sleep(WATCHDOG_CHECK_SECONDS)
             except Exception as exc:
                 log.exception("Loop watchdog check failed")
                 await self._check_alerter.failed(exc)
-                await asyncio.sleep(WATCHDOG_CHECK_SECONDS)
-
-    def _on_done(self, task: asyncio.Task) -> None:
-        if self._stopping or task.cancelled():
-            return
-        reason = describe_exit(task)
-        log.error("Loop watchdog ended unexpectedly (%s) — restarting it", reason)
-        # Held on self: asyncio keeps only a weak reference to a bare task.
-        self._death_post = task.get_loop().create_task(
-            log_to_discord(f"💀 **Loop watchdog** ended unexpectedly — `{reason}`. Restarting it.")
-        )
-        self.start()
+            await asyncio.sleep(WATCHDOG_CHECK_SECONDS)
 
 
 async def check_forum_config(guild: discord.Guild) -> None:
