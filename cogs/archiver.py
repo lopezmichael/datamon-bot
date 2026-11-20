@@ -36,14 +36,16 @@ class Archiver(commands.Cog):
         self._alerter = LoopFailureAlerter("Archive loop")
 
     async def cog_load(self) -> None:
-        self.archive_stale.start()
+        # hourly loop.
+        self.bot.watchdog.watch(self.archive_stale, self._alerter, stale_after=3 * 3600)
 
     async def cog_unload(self) -> None:
-        self.archive_stale.cancel()
+        self.bot.watchdog.unwatch(self.archive_stale)
 
     @tasks.loop(hours=1)
     async def archive_stale(self) -> None:
-        # An exception escaping the loop body kills the loop permanently
+        # An exception escaping the loop body kills the loop (the watchdog
+        # restarts it, but a handled failure is the one that carries context)
         try:
             await self._run_archive()
         except TRANSIENT_LOOP_EXCEPTIONS:

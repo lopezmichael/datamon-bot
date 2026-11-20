@@ -26,7 +26,7 @@ scripts/            # check_imports.py — loads every module the way boot does
 bot.py              # Entry point, DatamonBot subclass, lifecycle
 config.py           # Env vars, ROLE_MAP, FORUM_CHANNELS
 db.py               # asyncpg pool, all query helpers, dead-connection retry
-utils.py            # Webhook logging, LoopFailureAlerter, thread tag helpers
+utils.py            # Webhook logging, LoopFailureAlerter, LoopWatchdog, thread tag helpers
 messages.py         # Message templates for forum thread responses (game-aware)
 games.py            # Shared game cache on the bot: which games are live, what to call them
 cogs/
@@ -63,6 +63,9 @@ cogs/
 - **Never call `pool.fetch` / `fetchrow` / `execute` directly**, in `db.py` or anywhere else. Go through `_fetch` / `_fetchrow` / `_run`, which retry when Neon has dropped the pooled connection out from under us. Anything routed through `_run` must be safe to run more than once
 - Bot is **read-only** on the database except for `UPDATE admin_requests SET status='resolved'` — enforced at the DB level since 2026-07-29: the `datamon_bot` Postgres role has SELECT everywhere and column-level UPDATE on `admin_requests(status, resolved_at, resolved_by)` only
 - Periodic loops report failures via `utils.LoopFailureAlerter`, not a hand-rolled flag. Construct it with a threshold matched to the loop's cadence: >1 for the 5-minute loops so a single blip stays quiet, 1 for hourly-and-slower where the next data point is far away
+- **Every `tasks.loop` is started through `bot.watchdog.watch(loop, alerter, stale_after=...)`**, never `loop.start()`, and stopped with `unwatch` (ratcheted in `test_conventions.py`). role_sync's loop stopped around 2026-10-27 and nobody noticed for 3.5 weeks, because discord.ext.tasks ends a loop silently in ways no body code can report: an escaped exception stops it for good; a stray `CancelledError` stops it WITHOUT calling `.error` (and `failed()` stays False); a hung await looks "running"; and a body re-raising a transient error is retried with backoff forever (`TimeoutError` is an `OSError`, so it lands in `TRANSIENT_LOOP_EXCEPTIONS`). The watchdog checks every minute from outside: a loop whose task ended is reported with its exit reason and restarted (immediately, then 1 min doubling to 1 h; posts on the first death and once at the third), and one whose heartbeat is older than `stale_after` is reported once, with a recovery line, but not restarted. The heartbeat is the alerter: `failed()`/`recovered()` stamp it, so a tick that deliberately does nothing must call `alerter.beat()` (the digest's non-Monday ticks) or it reads as hung. Set `stale_after` at a few times the real period
+- A loop whose run can be safely cut short bounds it with `utils.run_bounded`, which raises `IterationTimeout` (a plain Exception, so the alerter sees it) rather than a `TimeoutError` the transient clause would swallow. role_sync does (10 min); loops that post messages do not
+- A condition a loop hits every tick until a human fixes it (a role the bot may not grant, an empty members cache) goes to #bot-log through `utils.ProblemSetAlert`, which posts when the set of problems appears or changes and once when it clears, never per run. `log.warning` alone is invisible: Railway keeps a week of stdout
 - Slash commands that query the DB must `defer()` before the first query — Discord rejects a first response after 3 seconds, and a Neon cold start can exceed that. `defer()` fixes the reply's visibility for the whole interaction, so it is only straightforward where every path shares one ephemerality
 - Discord rate limits: role_sync adds 1-second delays between role changes
 - The three **tier** roles (Platform/Regional/Scene) are the bot's to own — it is the only

@@ -8,7 +8,13 @@ from discord.ext import commands, tasks
 
 import config
 import db
-from utils import TRANSIENT_LOOP_EXCEPTIONS, LoopFailureAlerter, log_to_discord
+from utils import (
+    TRANSIENT_LOOP_EXCEPTIONS,
+    LoopFailureAlerter,
+    ProblemSetAlert,
+    log_to_discord,
+    run_bounded,
+)
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +27,14 @@ log = logging.getLogger(__name__)
 # truncates silently reads as "everyone is synced".
 MAX_GAME_ROLE_GRANTS_PER_RUN = 40
 
+# Hard ceiling on one run. A converged run takes seconds; the slowest legitimate
+# one (a mass reverse pass after a config change, ~1 s per removal) takes a few
+# minutes, and a cut-short run simply continues next tick, since every pass is
+# idempotent. Without this, one await that never returns holds the loop forever
+# with nothing logged — the shape of the 2026-10-27 incident. With it, the hang
+# becomes an `IterationTimeout` the alerter reports, and the loop carries on.
+RUN_TIMEOUT_SECONDS = 10 * 60
+
 
 class RoleSync(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
@@ -28,18 +42,30 @@ class RoleSync(commands.Cog):
         # 5-minute loop: require two consecutive failures so a single blip that
         # heals on the next tick never reaches #bot-log.
         self._alerter = LoopFailureAlerter("Role sync loop", threshold=2)
+        # The two ways a run used to give up in silence, every five minutes,
+        # until a human happened to read stdout. Posted when they start or
+        # change, not per run. An admin whose Discord account is not in the
+        # guild is NOT one of these: that is normal, and stays unreported.
+        self._skip_alert = ProblemSetAlert("Role sync is skipping every run")
+        self._forbidden_alert = ProblemSetAlert(
+            "Role sync is not allowed to make these changes",
+            hint="Usually the target role sits above the bot's own role, or the "
+            "bot lost Manage Roles. Retried every run.",
+        )
 
     async def cog_load(self) -> None:
-        self.sync_roles.start()
+        # 5-minute loop; four missed runs is news.
+        self.bot.watchdog.watch(self.sync_roles, self._alerter, stale_after=20 * 60)
 
     async def cog_unload(self) -> None:
-        self.sync_roles.cancel()
+        self.bot.watchdog.unwatch(self.sync_roles)
 
     @tasks.loop(minutes=5)
     async def sync_roles(self) -> None:
-        # An exception escaping the loop body kills the loop permanently
+        # An exception escaping the loop body kills the loop (the watchdog
+        # restarts it, but a handled failure is the one that carries context)
         try:
-            await self._run_sync()
+            await run_bounded(self._run_sync(), RUN_TIMEOUT_SECONDS, "Role sync")
         except TRANSIENT_LOOP_EXCEPTIONS:
             # Let discord.ext.tasks retry these with its own backoff
             raise
@@ -53,14 +79,21 @@ class RoleSync(commands.Cog):
         guild = self.bot.get_guild(config.GUILD_ID)
         if not guild:
             log.warning("Guild %s not found", config.GUILD_ID)
+            await self._skip_alert.update([f"Guild {config.GUILD_ID} is not in the bot's cache"])
             return
 
         if len(guild.members) < 2:
             log.warning("Guild has <2 cached members — skipping sync (check GUILD_MEMBERS intent)")
+            await self._skip_alert.update([
+                "The guild has fewer than 2 cached members — check the "
+                "GUILD_MEMBERS privileged intent"
+            ])
             return
+        await self._skip_alert.update([])
 
         admins = await db.get_active_admins(self.bot.pool)
         changes: list[str] = []
+        forbidden: list[str] = []
 
         # Build lookup: discord_user_id → expected role ID
         admin_lookup: dict[int, int] = {}
@@ -92,6 +125,7 @@ class RoleSync(commands.Cog):
                     await asyncio.sleep(1)
                 except discord.Forbidden:
                     log.warning("Cannot add role %s to %s (insufficient permissions)", expected_role.name, member)
+                    forbidden.append(_forbidden_line("add", expected_role, member))
 
             # Remove other DigiLab roles that don't match
             for role in member.roles:
@@ -102,6 +136,7 @@ class RoleSync(commands.Cog):
                         await asyncio.sleep(1)
                     except discord.Forbidden:
                         log.warning("Cannot remove role %s from %s", role.name, member)
+                        forbidden.append(_forbidden_line("remove", role, member))
 
         # Reverse pass: Discord → DB (remove roles from non-admins)
         for member in guild.members:
@@ -116,8 +151,10 @@ class RoleSync(commands.Cog):
                         await asyncio.sleep(1)
                     except discord.Forbidden:
                         log.warning("Cannot remove role %s from %s", role.name, member)
+                        forbidden.append(_forbidden_line("remove", role, member))
 
-        await self._sync_game_roles(guild, changes)
+        await self._sync_game_roles(guild, changes, forbidden)
+        await self._forbidden_alert.update(forbidden)
 
         # Update bot status
         scene_count = await db.get_scene_count(self.bot.pool)
@@ -130,7 +167,9 @@ class RoleSync(commands.Cog):
             await log_to_discord(msg)
             log.info("Role sync: %d changes", len(changes))
 
-    async def _sync_game_roles(self, guild: discord.Guild, changes: list[str]) -> None:
+    async def _sync_game_roles(
+        self, guild: discord.Guild, changes: list[str], forbidden: list[str]
+    ) -> None:
         """Grant each admin the Discord role for every game they administer.
 
         **Additive only. This never removes a game role, and that is the whole
@@ -190,6 +229,7 @@ class RoleSync(commands.Cog):
                     await asyncio.sleep(1)
                 except discord.Forbidden:
                     log.warning("Cannot add game role %s to %s", role.name, member)
+                    forbidden.append(_forbidden_line("add", role, member))
 
         if pending:
             log.info(
@@ -201,6 +241,16 @@ class RoleSync(commands.Cog):
     @sync_roles.before_loop
     async def before_sync(self) -> None:
         await self.bot.wait_until_ready()
+
+
+def _forbidden_line(action: str, role: discord.Role, member: discord.Member) -> str:
+    """One stable line per refused change, so the dedupe can compare runs.
+
+    Names the member by display name and ID rather than a mention: this is a
+    permissions problem for whoever reads #bot-log, not something to ping the
+    admin about.
+    """
+    return f"{action} **{role.name}** — {member.display_name} ({member.id})"
 
 
 async def setup(bot: commands.Bot) -> None:
