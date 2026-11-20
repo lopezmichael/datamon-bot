@@ -74,10 +74,11 @@ class Commands(commands.Cog):
 
     async def cog_load(self) -> None:
         await self._refresh_cache()
-        self.refresh_scene_cache.start()
+        # 5-minute loop; four missed runs is news.
+        self.bot.watchdog.watch(self.refresh_scene_cache, self._alerter, stale_after=20 * 60)
 
     async def cog_unload(self) -> None:
-        self.refresh_scene_cache.cancel()
+        self.bot.watchdog.unwatch(self.refresh_scene_cache)
 
     async def _refresh_cache(self) -> None:
         scenes = await db.get_scenes(self.bot.pool)
@@ -118,8 +119,9 @@ class Commands(commands.Cog):
 
     @tasks.loop(minutes=5)
     async def refresh_scene_cache(self) -> None:
-        # An exception escaping the loop body kills the loop permanently,
-        # freezing scene autocomplete on a stale cache
+        # An exception escaping the loop body kills the loop, freezing scene
+        # autocomplete on a stale cache until the watchdog restarts it — and a
+        # handled failure is the one that carries context
         try:
             await self._refresh_cache()
         except TRANSIENT_LOOP_EXCEPTIONS:
