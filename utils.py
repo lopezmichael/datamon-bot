@@ -78,12 +78,11 @@ async def post_webhook(
     in order over one session. `allowed_mentions=None` keeps the library default
     (mentions ping), which the weekly digest relies on to tag scene admins.
     """
-    send_kwargs = {"allowed_mentions": allowed_mentions} if allowed_mentions else {}
     try:
         async with aiohttp.ClientSession() as session:
             webhook = discord.Webhook.from_url(url, session=session)
             for chunk in _chunk_message(message):
-                await webhook.send(chunk, username=username, **send_kwargs)
+                await webhook.send(chunk, username=username, allowed_mentions=allowed_mentions)
     except Exception:
         log.exception("Failed to post to webhook")
 
@@ -454,8 +453,16 @@ class LoopWatchdog:
     async def _run(self) -> None:
         while True:
             try:
-                await self.check(time.monotonic())
-                await self._check_alerter.recovered()
+                # The failure post is inside the cancel guard too: a stray
+                # CancelledError from the webhook post in failed() would
+                # otherwise escape the handler and end the watchdog silently.
+                try:
+                    await self.check(time.monotonic())
+                except Exception as exc:
+                    log.exception("Loop watchdog check failed")
+                    await self._check_alerter.failed(exc)
+                else:
+                    await self._check_alerter.recovered()
             except asyncio.CancelledError:
                 # A real cancel (stop(), interpreter shutdown) is a request on
                 # THIS task. Anything else is a stray from something we awaited,
@@ -463,9 +470,6 @@ class LoopWatchdog:
                 if asyncio.current_task().cancelling():
                     raise
                 log.error("Loop watchdog absorbed a stray CancelledError")
-            except Exception as exc:
-                log.exception("Loop watchdog check failed")
-                await self._check_alerter.failed(exc)
             await asyncio.sleep(WATCHDOG_CHECK_SECONDS)
 
 

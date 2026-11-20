@@ -417,6 +417,44 @@ def test_the_watchdog_survives_its_own_failures_and_stops_only_on_stop() -> None
         utils.WATCHDOG_CHECK_SECONDS = original
 
 
+def test_a_stray_cancel_from_the_failure_post_does_not_end_the_watchdog() -> None:
+    """The failure alert posts to #bot-log from inside the check's error path. A
+    stray CancelledError out of that post must be absorbed like any other stray,
+    not escape the handler and end the watchdog with no record."""
+    _reset()
+    original = utils.WATCHDOG_CHECK_SECONDS
+    utils.WATCHDOG_CHECK_SECONDS = 0.005
+
+    async def go():
+        dog = LoopWatchdog()
+        dog._check_alerter.threshold = 1
+        calls = {"n": 0}
+
+        async def failing_check(now):
+            calls["n"] += 1
+            raise RuntimeError("check bug")
+
+        async def cancelling_post(message: str) -> None:
+            raise asyncio.CancelledError()  # a stray from the webhook post
+
+        dog.check = failing_check
+        utils.log_to_discord = cancelling_post
+        try:
+            dog.start()
+            await _until(lambda: calls["n"] >= 3)
+            assert dog._task and not dog._task.done(), "a stray cancel in the alert must not end it"
+        finally:
+            utils.log_to_discord = _capture
+            task = dog._task
+            dog.stop()
+            await _until(task.done)
+
+    try:
+        asyncio.run(go())
+    finally:
+        utils.WATCHDOG_CHECK_SECONDS = original
+
+
 def test_a_transient_monday_digest_failure_is_reported_not_deferred_to_tuesday() -> None:
     """The digest is a `time=` loop: a re-raised transient error would be retried
     at the NEXT scheduled tick (Tuesday), where the weekday gate skips it. So it
